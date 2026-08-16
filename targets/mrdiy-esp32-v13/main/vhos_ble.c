@@ -24,6 +24,8 @@
 
 #define VHOS_BLE_TX_MAX_BYTES 1100U
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
+#define VHOS_BLE_NOTIFICATION_PACE_MS 15U
+#define VHOS_BLE_MBUF_RETRY_LIMIT 20U
 
 typedef struct {
     size_t length;
@@ -172,12 +174,21 @@ static void tx_task(void *argument)
         for (size_t offset = 0; offset < item.length; offset += maximum_chunk) {
             size_t remaining = item.length - offset;
             size_t chunk_length = remaining < maximum_chunk ? remaining : maximum_chunk;
-            struct os_mbuf *packet = os_msys_get_pkthdr(chunk_length, 0);
-            if (packet == NULL || os_mbuf_append(packet, &item.data[offset], chunk_length) != 0) {
+            struct os_mbuf *packet = NULL;
+            for (unsigned int attempt = 0; attempt < VHOS_BLE_MBUF_RETRY_LIMIT; ++attempt) {
+                packet = os_msys_get_pkthdr(chunk_length, 0);
                 if (packet != NULL) {
-                    os_mbuf_free_chain(packet);
+                    break;
                 }
-                ESP_LOGE(TAG, "Unable to allocate BLE notification packet");
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (packet == NULL) {
+                ESP_LOGE(TAG, "Unable to allocate BLE notification packet after retries");
+                break;
+            }
+            if (os_mbuf_append(packet, &item.data[offset], chunk_length) != 0) {
+                os_mbuf_free_chain(packet);
+                ESP_LOGE(TAG, "Unable to append BLE notification packet");
                 break;
             }
             int result = ble_gatts_notify_custom(active_connection, value_handle, packet);
@@ -185,7 +196,8 @@ static void tx_task(void *argument)
                 ESP_LOGW(TAG, "BLE notify failed: rc=%d", result);
                 break;
             }
-            vTaskDelay(pdMS_TO_TICKS(2));
+            /* Keep the controller pool below saturation when ATT MTU is still 23 bytes. */
+            vTaskDelay(pdMS_TO_TICKS(VHOS_BLE_NOTIFICATION_PACE_MS));
         }
     }
 }

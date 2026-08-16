@@ -40,6 +40,11 @@ already implemented.
 - Boot evidence reports the real NimBLE bond-record counts. The firmware does not silently erase
   bonds; if either side has a stale development key, forget VHOS on the phone and clear only the
   backed-up gateway NVS partition before pairing again.
+- The NimBLE host uses an 8 KiB task stack. Encryption plus simultaneous evidence, health, and OTA
+  subscriptions exceeded the ESP-IDF default 4 KiB stack during physical commissioning; the
+  resulting watchdog reboot looked like a bond failure even though both bond records persisted.
+- Large framed notifications are paced and briefly retry controller-buffer allocation, including
+  while the connection is still using the 23-byte default ATT MTU.
 - Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;
   it does not create an unsupervised FreeRTOS retry task.
 
