@@ -41,6 +41,11 @@ the generated binary partition table, verifies the embedded bootloader,
 partition table, OTA metadata, and application segments byte-for-byte, and
 writes SHA-256 release metadata under `dist/`.
 
+The merged image is for the backup-first address-zero Web Serial install. The
+separate `-ota.bin` application image is published for the future signed Wi-Fi
+OTA path, but this development release does not authorize or advertise that
+capability yet.
+
 ## Recovery test status
 
 The automated check is a static merged-image and rollback-topology test. The

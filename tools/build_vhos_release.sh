@@ -3,6 +3,7 @@ set -euo pipefail
 
 release="${1:-v0.1.0-dev.1}"
 artifact="vhos-wican-pro-esp32s3-${release}-merged.bin"
+ota_artifact="vhos-wican-pro-esp32s3-${release}-ota.bin"
 artifact_url="${VHOS_ARTIFACT_URL:-https://github.com/IsaiahDupree/4runner-vhos-firmware/releases/download/${release}/${artifact}}"
 
 # Git metadata is embedded in both the project name and VHOS handshake. Force
@@ -13,6 +14,7 @@ mkdir -p dist
 idf.py merge-bin --format raw -o "${PWD}/dist/${artifact}"
 
 project_name="$(${PYTHON:-python3} -c 'import json; print(json.load(open("build/project_description.json", encoding="utf-8"))["project_name"])')"
+install -m 0644 "build/${project_name}.bin" "dist/${ota_artifact}"
 ${PYTHON:-python3} tools/validate_vhos_release.py \
   --release "${release}" \
   --merged "dist/${artifact}" \
@@ -23,4 +25,4 @@ ${PYTHON:-python3} tools/validate_vhos_release.py \
   --manifest dist/manifest.json \
   --recovery-report dist/recovery-validation.json
 
-sha256sum "dist/${artifact}" "build/${project_name}.bin" > dist/SHA256SUMS
+sha256sum "dist/${artifact}" "dist/${ota_artifact}" > dist/SHA256SUMS
