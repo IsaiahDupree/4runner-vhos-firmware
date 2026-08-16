@@ -29,6 +29,17 @@ The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rol
 enabled. This is recovery groundwork, not a claim that a Wi-Fi OTA upload endpoint is
 already implemented.
 
+## Wi-Fi access-point status
+
+Firmware `v0.1.0-dev.5` does not initialize Wi-Fi, advertise a SoftAP, run an HTTP server,
+or host a browser status page. Its live commissioning and health channel is BLE only. The
+public VHOS gateway provisioner is an internet-hosted desktop USB flasher; it is not served
+by this ESP32.
+
+Any future local status page must report the same real health counters used by BLE, preserve
+the listen-only safety boundary, require authenticated access, and expose no arbitrary CAN
+transmit or diagnostic-command surface.
+
 ## BLE commissioning
 
 - Primary advertising includes the VHOS service UUID and short name; the full
@@ -45,6 +56,8 @@ already implemented.
   resulting watchdog reboot looked like a bond failure even though both bond records persisted.
 - Large framed notifications are paced and briefly retry controller-buffer allocation, including
   while the connection is still using the 23-byte default ATT MTU.
+- The peripheral requests a 30–50 ms connection interval, zero peripheral latency, and a six-second
+  supervision timeout. Negotiated values are logged for physical reconnect diagnosis.
 - Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;
   it does not create an unsupervised FreeRTOS retry task.
 

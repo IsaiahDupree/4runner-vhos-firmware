@@ -26,6 +26,10 @@
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
 #define VHOS_BLE_NOTIFICATION_PACE_MS 15U
 #define VHOS_BLE_MBUF_RETRY_LIMIT 20U
+#define VHOS_BLE_CONN_INTERVAL_MIN 24U
+#define VHOS_BLE_CONN_INTERVAL_MAX 40U
+#define VHOS_BLE_CONN_LATENCY 0U
+#define VHOS_BLE_SUPERVISION_TIMEOUT 600U
 
 typedef struct {
     size_t length;
@@ -238,6 +242,49 @@ static void schedule_advertising(void)
     }
 }
 
+static void log_connection_parameters(uint16_t handle, const char *phase)
+{
+    struct ble_gap_conn_desc description;
+    int result = ble_gap_conn_find(handle, &description);
+    if (result != 0) {
+        ESP_LOGW(TAG, "BLE_CONN_PARAMS_%s unavailable rc=%d", phase, result);
+        return;
+    }
+    ESP_LOGI(
+        TAG,
+        "BLE_CONN_PARAMS_%s interval_units=%u latency=%u supervision_units=%u",
+        phase,
+        description.conn_itvl,
+        description.conn_latency,
+        description.supervision_timeout
+    );
+}
+
+static void request_stable_connection_parameters(uint16_t handle)
+{
+    const struct ble_gap_upd_params parameters = {
+        .itvl_min = VHOS_BLE_CONN_INTERVAL_MIN,
+        .itvl_max = VHOS_BLE_CONN_INTERVAL_MAX,
+        .latency = VHOS_BLE_CONN_LATENCY,
+        .supervision_timeout = VHOS_BLE_SUPERVISION_TIMEOUT,
+        .min_ce_len = 0,
+        .max_ce_len = 0,
+    };
+    int result = ble_gap_update_params(handle, &parameters);
+    if (result != 0) {
+        ESP_LOGW(TAG, "BLE_CONN_PARAMS_REQUEST failed rc=%d", result);
+    } else {
+        ESP_LOGI(
+            TAG,
+            "BLE_CONN_PARAMS_REQUEST interval_units=%u-%u latency=%u supervision_units=%u",
+            parameters.itvl_min,
+            parameters.itvl_max,
+            parameters.latency,
+            parameters.supervision_timeout
+        );
+    }
+}
+
 static int gap_event(struct ble_gap_event *event, void *argument)
 {
     (void)argument;
@@ -259,6 +306,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                     );
                 }
             }
+            log_connection_parameters(connection_handle, "INITIAL");
+            request_stable_connection_parameters(connection_handle);
             ESP_LOGI(TAG, "IPHONE_LINK_CONNECTED handle=%u", connection_handle);
         } else {
             ESP_LOGW(TAG, "BLE connection attempt failed: status=%d", event->connect.status);
@@ -273,6 +322,15 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         status_notify_enabled = false;
         vhos_transport_reset();
         schedule_advertising();
+        return 0;
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        ESP_LOGI(TAG, "BLE_CONN_UPDATE status=%d", event->conn_update.status);
+        if (event->conn_update.status == 0) {
+            log_connection_parameters(event->conn_update.conn_handle, "ACTIVE");
+        }
+        return 0;
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "BLE_MTU value=%u", event->mtu.value);
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         ESP_LOGW(TAG, "BLE advertising completed: reason=%d", event->adv_complete.reason);
