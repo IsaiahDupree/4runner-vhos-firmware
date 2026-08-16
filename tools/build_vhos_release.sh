@@ -5,6 +5,9 @@ release="${1:-v0.1.0-dev.1}"
 artifact="vhos-wican-pro-esp32s3-${release}-merged.bin"
 artifact_url="${VHOS_ARTIFACT_URL:-https://github.com/IsaiahDupree/4runner-vhos-firmware/releases/download/${release}/${artifact}}"
 
+# Git metadata is embedded in both the project name and VHOS handshake. Force
+# CMake to observe the current commit instead of reusing a prior build cache.
+idf.py reconfigure
 idf.py build
 mkdir -p dist
 idf.py merge-bin --format raw -o "${PWD}/dist/${artifact}"
