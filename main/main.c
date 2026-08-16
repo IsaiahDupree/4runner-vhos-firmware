@@ -79,6 +79,7 @@
 #include "sync_sys_time.h"
 #include "vpn_manager.h"
 #include "config_mode.h"
+#include "vhos_recovery.h"
 #include "driver/rtc_io.h"
 
 #define TAG 		__func__
@@ -269,6 +270,10 @@ static void can_tx_task(void *pvParameters)
 
 		memset(ucTCP_RX_Buffer.ucElement,0, DEV_BUFFER_LENGTH);
 		xQueueReceive(xMsg_Rx_Queue, &ucTCP_RX_Buffer, portMAX_DELAY);
+		#if VHOS_FIRMWARE
+		ESP_LOGW(TAG, "External vehicle-bus command rejected by VHOS passive-only policy");
+		continue;
+		#endif
 		ESP_LOGI(TAG, "----------");
 		ESP_LOG_BUFFER_HEXDUMP(TAG, ucTCP_RX_Buffer.ucElement, ucTCP_RX_Buffer.usLen, ESP_LOG_INFO);
 		ESP_LOGI(TAG, "----------");
@@ -771,7 +776,6 @@ void app_main(void)
 	#endif
 
 
-	esp_ota_mark_app_valid_cancel_rollback();
 //    xmsg_obd_rx_queue = xQueueCreate(100, sizeof( twai_message_t) );
 
     ESP_ERROR_CHECK(esp_read_mac(derived_mac_addr, ESP_MAC_WIFI_SOFTAP));
@@ -831,17 +835,11 @@ void app_main(void)
 		can_set_bitrate(CAN_500K);
 	}
 
-	if(config_server_get_can_mode() == CAN_NORMAL)
-	{
-		can_set_silent(0);
-	}
-	else
-	{
-		can_set_silent(1);
-	}
+	can_set_silent(1);
 
-	protocol = config_server_protocol();
+	protocol = OBD_ELM327;
 
+	#if !VHOS_FIRMWARE
 	wifi_mode_t wifi_mode = config_server_get_wifi_mode();
 
 	if(wifi_mode == SMARTCONNECT_MODE)
@@ -856,6 +854,7 @@ void app_main(void)
 			protocol = OBD_ELM327;
 		}
 	}
+	#endif
 
 	if(protocol == REALDASH)
 	{
@@ -1011,7 +1010,7 @@ void app_main(void)
 		#endif
 	}
 
-	if(config_server_get_ble_config())
+	if(true)
 	{
 		int pass = config_server_ble_pass();
 		static xdev_buffer* xmsg_ble_tx_queue_Storage;
@@ -1028,11 +1027,8 @@ void app_main(void)
 			free(internal_buf);
 		}
 		ble_init(&xmsg_ble_tx_queue, &xMsg_Rx_Queue, 0, pass, &ble_uid[0]);
-		if(wifi_mode != SMARTCONNECT_MODE)
-		{
-			ble_enable();
-			ESP_LOGI(TAG, "BLE enabled, SMARTCONNECT mode is disabled");
-		}
+		ble_enable();
+		ESP_LOGI(TAG, "VHOS BLE service enabled");
 		#endif
 	}
 
@@ -1173,5 +1169,9 @@ void app_main(void)
     #endif
 
 	cmdline_init();
+	if (vhos_recovery_confirm_boot() != ESP_OK)
+	{
+		ESP_LOGE(TAG, "VHOS boot self-test failed; requesting rollback");
+		esp_ota_mark_app_invalid_rollback_and_reboot();
+	}
 }
-

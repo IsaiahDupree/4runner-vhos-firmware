@@ -192,6 +192,14 @@ static esp_err_t ws_router_handle_terminal_cmd(httpd_req_t *req, const char *cmd
 		return ESP_ERR_INVALID_ARG;
 	}
 
+#if VHOS_FIRMWARE
+	if (s_term_type == WS_TERMINAL_TYPE_ELM327)
+	{
+		ws_router_send_term_out(req, "ELM327 transmit access is disabled in the passive VHOS foundation build\n");
+		return ESP_ERR_NOT_SUPPORTED;
+	}
+#endif
+
 	if (s_term_mutex == NULL)
 	{
 		s_term_mutex = xSemaphoreCreateMutexStatic(&s_term_mutex_buf);
@@ -312,7 +320,14 @@ bool ws_router_handle_frame(httpd_req_t *req, const uint8_t *payload, size_t len
 			{
 				if (strcmp(tt->valuestring, "elm327") == 0)
 				{
+				#if VHOS_FIRMWARE
+					ws_router_set_terminal_type(WS_TERMINAL_TYPE_CONSOLE);
+					(void)ws_router_send_json(req, "{\"type\":\"ws_mode\",\"ws_mode\":\"terminal\",\"terminal_type\":\"elm327\",\"ok\":false,\"error\":\"disabled_in_passive_vhos_build\"}");
+					cJSON_Delete(root);
+					return true;
+				#else
 					ws_router_set_terminal_type(WS_TERMINAL_TYPE_ELM327);
+				#endif
 				}
 				else
 				{

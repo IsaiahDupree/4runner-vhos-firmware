@@ -37,6 +37,8 @@ set(srcs
     "multipart_upload.c"
     "sync_sys_time.c"
     "config_mode.c"
+    "vhos_transport.c"
+    "vhos_recovery.c"
 )
 
 # Define required components

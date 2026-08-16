@@ -1,5 +1,14 @@
 <img src="https://github.com/slimelec/ollie-hw/blob/master/images/mpi_logo.png" width=300>
 
+> **VHOS development fork.** This branch targets the ESP32-S3 WiCAN Pro and is
+> pinned to MeatPi's `v4.50p` source. The current VHOS build is a bench-only,
+> passive foundation: it exposes the versioned VHOS BLE handshake, forces the
+> CAN controller into listen-only mode, blocks external vehicle-bus transmit
+> paths, and enables ESP-IDF A/B rollback confirmation. It is not approved for
+> unattended or on-road use. Back up the complete factory flash before install.
+>
+> Build and release validation are documented in [VHOS_RELEASE.md](VHOS_RELEASE.md).
+
 [www.meatpi.com](https://www.meatpi.com)
 ---
 # [Documentation](https://meatpihq.github.io/wican-fw/) | [Firmware updates](https://github.com/meatpiHQ/wican-fw/releases/) | [Discord server](https://discord.com/invite/2hpHVDmyfw)

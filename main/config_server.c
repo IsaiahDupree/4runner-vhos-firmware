@@ -229,8 +229,8 @@ const char device_config_default[] = "{\"wifi_mode\":\"AP\",\"ap_ch\":\"6\",\"we
 										\"home_ssid\":\"MeatPi\",\"home_password\":\"TomatoSauce\",\"home_security\":\"wpa3\",\"home_protocol\":\"elm327\",\
 										\"drive_ssid\":\"MeatPi\",\"drive_password\":\"TomatoSauce\",\"drive_security\":\"wpa3\",\"drive_protocol\":\"elm327\",\"drive_connection_type\":\"wifi\",\"drive_mode_timeout\":\"60\",\
 										\"can_datarate\":\"500K\",\
-										\"can_mode\":\"normal\",\"port_type\":\"tcp\",\"port\":\"35000\",\"ap_pass\":\"@meatpi#\",\"protocol\":\"elm327\",\"ble_pass\":\"123456\",\
-								\"ble_status\":\"disable\",\"ble_power\":\"9\",\"sleep_status\":\"enable\",\"periodic_wakeup\":\"disable\",\"sleep_volt\":\"13.1\",\"wakeup_volt\":\"13.5\",\"sleep_time\":\"5\",\"wakeup_interval\":\"90\",\"batt_alert\":\"disable\",\
+										\"can_mode\":\"silent\",\"port_type\":\"tcp\",\"port\":\"35000\",\"ap_pass\":\"@meatpi#\",\"protocol\":\"elm327\",\"ble_pass\":\"123456\",\
+								\"ble_status\":\"enable\",\"ble_power\":\"9\",\"sleep_status\":\"enable\",\"periodic_wakeup\":\"disable\",\"sleep_volt\":\"13.1\",\"wakeup_volt\":\"13.5\",\"sleep_time\":\"5\",\"wakeup_interval\":\"90\",\"batt_alert\":\"disable\",\
 										\"batt_alert_ssid\":\"MeatPi\",\"batt_alert_pass\":\"TomatoSauce\",\"batt_alert_volt\":\"11.0\",\"batt_alert_protocol\":\"mqtt\",\
 										\"batt_alert_url\":\"mqtt://mqtt.eclipseprojects.io\",\"batt_alert_port\":\"1883\",\"batt_alert_topic\":\"CAR1/voltage\",\"batt_mqtt_user\":\"meatpi\",\
 								\"batt_mqtt_pass\":\"meatpi\",\"batt_alert_time\":\"1\",\"mqtt_en\":\"disable\",\"mqtt_elm327_log\":\"disable\",\"elm327_udp_log\":\"disable\",\"mqtt_url\":\"mqtt://127.0.0.1\",\"mqtt_port\":\"1883\",\
@@ -2274,6 +2274,11 @@ esp_err_t autopid_data_handler(httpd_req_t *req)
 #define MAX_AVAILABLE_PIDS_SIZE 		(1024*15)
 static esp_err_t scan_available_pids_handler(httpd_req_t *req)
 {
+#if VHOS_FIRMWARE
+    httpd_resp_send_err(req, HTTPD_403_FORBIDDEN,
+                        "Vehicle-bus protocol scanning is disabled in the passive VHOS foundation build");
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     char protocol[8];
     char param[32];
     uint8_t protocol_num = 6; // Default protocol
@@ -2308,6 +2313,7 @@ static esp_err_t scan_available_pids_handler(httpd_req_t *req)
 
     free(available_pids);
     return ESP_OK;
+#endif
 }
 
 static esp_err_t std_pid_info_handler(httpd_req_t *req) 
@@ -3683,7 +3689,9 @@ static httpd_handle_t config_server_init(void)
 		cert_manager_register_handlers(server);
 		// Register VPN manager endpoints
 		vpn_manager_register_handlers(server);
+		#if !VHOS_FIRMWARE
 		autopid_register_handlers(server);
+		#endif
 		ha_webhooks_register_handlers(server);
 		restart_tracker_register_handlers(server);
 		// Now register catch-all wildcard
@@ -3710,7 +3718,9 @@ void config_server_restart(void)
 		register_server_uris();
 		cert_manager_register_handlers(server);
 		vpn_manager_register_handlers(server);
+		#if !VHOS_FIRMWARE
 		autopid_register_handlers(server);
+		#endif
 		ha_webhooks_register_handlers(server);
 		restart_tracker_register_handlers(server);
 		httpd_register_uri_handler(server, &get_uri_common);
@@ -4268,4 +4278,3 @@ void config_server_set_ble_config(uint8_t b)
 	free((void *)resp_str);
     cJSON_Delete(root);
 }
-

@@ -112,8 +112,15 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.19.2
-  meatpihq/usb_host_ch34x_vcp:
-    component_hash: a448631fda325ce5f3f1b4bb4707c7cb075c6a4d71ff4026a22ef2191efc9af4
+  nopnop2002/sqlite3:
+    component_hash: 5cdde4e74291922e8da9a1ccfc870fe01a0893a6df3ebdd558ff8cd17869111f
+    dependencies: []
+    source:
+      git: https://github.com/nopnop2002/esp32-idf-sqlite3.git
+      path: components/esp32-idf-sqlite3/
+      type: git
+    version: 8c38efacd2d9225295e2abcc85f565c9b65bb1e0
+  usb_host_ch34x_vcp:
     dependencies:
     - name: espressif/usb_host_cdc_acm
       public: true
@@ -121,18 +128,9 @@ dependencies:
     - name: idf
       version: '>=4.4'
     source:
-      git: https://github.com/meatpiHQ/esp-usb.git
-      path: host/class/cdc/usb_host_ch34x_vcp
-      type: git
-    version: c80a574e26b4807816fdcb939218d143841b852c
-  nopnop2002/sqlite3:
-    component_hash: 3deae8ed52e238e19eb13d2a347f1b2a9efe1d7e04007be6df7b04555a5543f7
-    dependencies: []
-    source:
-      git: https://github.com/nopnop2002/esp32-idf-sqlite3.git
-      path: components/esp32-idf-sqlite3/
-      type: git
-    version: 8c38efacd2d9225295e2abcc85f565c9b65bb1e0
+      path: /project/third_party/esp-usb/host/class/cdc/usb_host_ch34x_vcp
+      type: local
+    version: 2.0.0
   zorxx/multipart-parser:
     component_hash: a80b98bbdd530829b5a4df54cd8332a265ef4d310392562cf37d4cac548c5fd2
     dependencies: []
@@ -143,14 +141,15 @@ dependencies:
 direct_dependencies:
 - eil/i2cdev
 - espressif/mdns
+- espressif/usb_host_cdc_acm
 - espressif/usb_host_cp210x_vcp
 - espressif/usb_host_ftdi_vcp
 - espressif/usb_host_vcp
 - idf
 - joltwallet/littlefs
-- meatpihq/usb_host_ch34x_vcp
 - nopnop2002/sqlite3
+- usb_host_ch34x_vcp
 - zorxx/multipart-parser
-manifest_hash: fea349af0598d79dcf7b5775ee0a9f6dd1ee7a0a3c9147a3a4dcad7dedac3de3
+manifest_hash: cdea838c19dda387acc18042ee71203e93fe5b7a7e72eb555278297294ed6f40
 target: esp32s3
 version: 2.0.0

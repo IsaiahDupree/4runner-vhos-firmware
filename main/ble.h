@@ -21,6 +21,10 @@
 #ifndef __BLE_H__
 #define __BLE_H__
 
+#include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+
 void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t connected_led, int passkey, uint8_t* uid);
 bool ble_connected(void);
 void ble_send(uint8_t* buf, uint8_t buf_len);
@@ -31,4 +35,5 @@ void ble_enable(void);
 void ble_pairing_enable(void);
 void ble_pairing_disable(void);
 bool ble_pairing_is_enabled(void);
+bool ble_vhos_service_ready(void);
 #endif

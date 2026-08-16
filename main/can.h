@@ -49,6 +49,13 @@ typedef struct {
 	uint8_t auto_bitrate;
 }can_cfg_t;
 
+typedef struct {
+	uint64_t received_frames;
+	uint64_t dropped_frames;
+	uint64_t bus_error_count;
+	uint64_t bus_off_count;
+} can_health_metrics_t;
+
 
 void can_enable(void);
 void can_disable(void);
@@ -65,5 +72,6 @@ uint8_t can_is_silent(void);
 bool can_is_enabled(void);
 uint8_t can_get_bitrate(void);
 uint32_t can_msgs_to_rx(void);
+esp_err_t can_get_health_metrics(can_health_metrics_t *metrics);
 
 #endif

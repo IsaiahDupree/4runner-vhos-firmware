@@ -1,0 +1,27 @@
+name: Build VHOS firmware
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - agent/**
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - name: Build, merge, and validate
+        run: bash tools/build_vhos_release.sh v0.1.0-dev.1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vhos-wican-pro-esp32s3-development
+          path: |
+            dist/*.bin
+            dist/*.json
+            dist/SHA256SUMS

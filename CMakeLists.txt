@@ -50,7 +50,9 @@ set(HARDWARE_VER ${WICAN_PRO})
 
 add_definitions(-DHARDWARE_VER=${HARDWARE_VER})
 
-set(PROJECT_PREF "wican-fw")
+set(PROJECT_PREF "vhos-gateway")
+set(PROJECT_VER "0.1.0-dev.1")
+add_definitions(-DVHOS_FIRMWARE=1)
 
 # Set HW_PREF based on HARDWARE_VER
 if (HARDWARE_VER EQUAL ${WICAN_PRO})

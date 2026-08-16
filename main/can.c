@@ -70,6 +70,11 @@ static uint8_t datarate = CAN_500K;
 //static uint32_t mask = 0xFFFFFFFF;
 //static uint32_t filter = 0;
 static can_cfg_t can_cfg = {.bus_state = END_BUS, .auto_bitrate = 0};
+static uint64_t received_frames = 0;
+static uint64_t last_dropped_frames = 0;
+static uint64_t last_bus_error_count = 0;
+static uint64_t bus_off_count = 0;
+static bool bus_off_observed = false;
 
 #define TWAI_CONFIG(tx_io_num, rx_io_num, op_mode) {.mode = op_mode, .tx_io = tx_io_num, .rx_io = rx_io_num,        \
                                                                     .clkout_io = TWAI_IO_UNUSED, .bus_off_io = TWAI_IO_UNUSED,      \
@@ -370,12 +375,22 @@ esp_err_t can_receive(twai_message_t *message, TickType_t ticks_to_wait)
 	// }
 	// else
 	{
-		return twai_receive(message, ticks_to_wait);
+		ret = twai_receive(message, ticks_to_wait);
+		if (ret == ESP_OK)
+		{
+			received_frames++;
+		}
+		return ret;
 	}
 }
 
 esp_err_t can_send(twai_message_t *message, TickType_t ticks_to_wait)
 {
+	#if VHOS_FIRMWARE
+	(void)message;
+	(void)ticks_to_wait;
+	return ESP_ERR_NOT_SUPPORTED;
+	#endif
 //	xEventGroupWaitBits(s_can_event_group,
 //							CAN_ENABLE_BIT,
 //							pdFALSE,
@@ -408,4 +423,40 @@ uint32_t can_msgs_to_rx(void)
 	twai_get_status_info(&status_info);
 
 	return status_info.msgs_to_rx;
+}
+
+esp_err_t can_get_health_metrics(can_health_metrics_t *metrics)
+{
+	if (metrics == NULL)
+	{
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	if (can_cfg.bus_state == ON_BUS)
+	{
+		twai_status_info_t status_info = {0};
+		esp_err_t status_result = twai_get_status_info(&status_info);
+		if (status_result != ESP_OK)
+		{
+			return status_result;
+		}
+		last_dropped_frames = (uint64_t)status_info.rx_missed_count + status_info.rx_overrun_count;
+		last_bus_error_count = status_info.bus_error_count;
+		bool bus_off_now = status_info.state == TWAI_STATE_BUS_OFF;
+		if (bus_off_now && !bus_off_observed)
+		{
+			bus_off_count++;
+		}
+		bus_off_observed = bus_off_now;
+	}
+	else
+	{
+		bus_off_observed = false;
+	}
+
+	metrics->received_frames = received_frames;
+	metrics->dropped_frames = last_dropped_frames;
+	metrics->bus_error_count = last_bus_error_count;
+	metrics->bus_off_count = bus_off_count;
+	return ESP_OK;
 }

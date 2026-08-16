@@ -52,7 +52,7 @@
 #include "dev_status.h"
 #include "wifi_mgr.h"
 #include "autopid.h"
-#include "cmdline.h"
+#include "vhos_transport.h"
 
 #define ADV_CONFIG_FLAG                           (1 << 0)
 #define SCAN_RSP_CONFIG_FLAG                      (1 << 1)
@@ -70,7 +70,6 @@
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX               0x40
 #define BLE_SEND_BUF_SIZE                         490
 #define BLE_CMDLINE_MAX                           1024
-static void ble_cmdline_output(const char *data, size_t len);
 
 #define BLE_CONNECTED_BIT 			BIT0
 #define BLE_CONGEST_BIT			BIT1
@@ -138,13 +137,13 @@ enum {
     IDX_CHAR_FFF2_DECL,          // 4
     IDX_CHAR_FFF2_VAL,           // 5
 
-    // CLI characteristics inside FFF0
-    IDX_CHAR_CLI_OUT_DECL,       // 6
-    IDX_CHAR_CLI_OUT_VAL,        // 7
-    IDX_CHAR_CLI_OUT_CCCD,       // 8
+    IDX_CHAR_STATUS_DECL,        // 6
+    IDX_CHAR_STATUS_VAL,         // 7
+    IDX_CHAR_STATUS_CCCD,        // 8
 
-    IDX_CHAR_CLI_IN_DECL,        // 9
-    IDX_CHAR_CLI_IN_VAL,         // 10
+    IDX_CHAR_OTA_STATUS_DECL,    // 9
+    IDX_CHAR_OTA_STATUS_VAL,     // 10
+    IDX_CHAR_OTA_STATUS_CCCD,    // 11
 
     FFF0_IDX_NB
 };
@@ -201,17 +200,26 @@ static const uint8_t spp_rw_char_value[9] = {
 // Typically we store CCCD as 2 bytes: {0x00, 0x00}
 static const uint8_t heart_measurement_ccc[2] = {0x00, 0x00};
 
-/* --- 3) Custom FFF0 Service (0000FFF0-0000-1000-8000-00805f9b34fb) --- */
-// 16-bit service: 0xFFF0
-static const uint16_t GATTS_SERVICE_UUID_FFF0 =             0xFFF0;
-static const uint16_t GATTS_CHAR_UUID_FFF1 =                0xFFF1; // notify + indicate
-static const uint16_t GATTS_CHAR_UUID_FFF2 =                0xFFF2; // write + write-no-response
-
-static const uint8_t char_value_dummy[1] = {0x00};  // Just a placeholder value
-
-static uint8_t GATTS_CHAR_UUID_CUSTOM2[16] = {
-    0x9F, 0x9F, 0x00, 0xC1, 0x58, 0xBD, 0x32, 0xB6,
-    0x9E, 0x4C, 0x21, 0x9C, 0xC9, 0xD6, 0xF8, 0xBE
+/* VHOS public GATT contract. ESP-IDF stores 128-bit UUIDs least-significant byte first. */
+static const uint8_t VHOS_SERVICE_UUID[16] = {
+    0x23, 0xF1, 0xB3, 0x12, 0x8F, 0xA1, 0xFA, 0x83,
+    0xD1, 0x42, 0xCA, 0xFF, 0xB3, 0x3E, 0x61, 0x33
+};
+static const uint8_t VHOS_COMMAND_UUID[16] = {
+    0x0A, 0xFC, 0xA5, 0x47, 0xAB, 0xA1, 0xAB, 0xA2,
+    0x54, 0x4D, 0x44, 0x02, 0x9B, 0x27, 0xD3, 0xB3
+};
+static const uint8_t VHOS_STREAM_UUID[16] = {
+    0xCC, 0x49, 0x1C, 0x41, 0xDA, 0x5C, 0xBD, 0xBB,
+    0x59, 0x46, 0x00, 0xA6, 0xC0, 0x90, 0x5B, 0x26
+};
+static const uint8_t VHOS_STATUS_UUID[16] = {
+    0xA9, 0x41, 0x9B, 0xF1, 0xDF, 0xD2, 0x9B, 0xB6,
+    0xB8, 0x49, 0xB4, 0xA9, 0x9A, 0x69, 0xB5, 0xBC
+};
+static const uint8_t VHOS_OTA_STATUS_UUID[16] = {
+    0x74, 0x58, 0x35, 0xFC, 0xBB, 0x27, 0x3C, 0x92,
+    0xB3, 0x4D, 0x90, 0xD1, 0x8E, 0x1F, 0xD2, 0x18
 };
 
 static const uint16_t primary_service_uuid         = ESP_GATT_UUID_PRI_SERVICE;
@@ -231,17 +239,18 @@ static const uint8_t CMD_SERVICE_UUID[16] __attribute__((unused)) = {
     0xBE, 0xF0, 0xAD, 0xDE, 0x34, 0x12, 0x78, 0x56,
     0x9A, 0xBC, 0xEF, 0x01, 0xC0, 0xDE, 0x00, 0x01
 };
-static const uint8_t CMD_OUT_CHAR_UUID[16] = {
+static const uint8_t CMD_OUT_CHAR_UUID[16] __attribute__((unused)) = {
     0xBE, 0xF0, 0xAD, 0xDE, 0x34, 0x12, 0x78, 0x56,
     0x9A, 0xBC, 0xEF, 0x01, 0xC0, 0xDE, 0x00, 0x02
 };
-static const uint8_t CMD_IN_CHAR_UUID[16] = {
+static const uint8_t CMD_IN_CHAR_UUID[16] __attribute__((unused)) = {
     0xBE, 0xF0, 0xAD, 0xDE, 0x34, 0x12, 0x78, 0x56,
     0x9A, 0xBC, 0xEF, 0x01, 0xC0, 0xDE, 0x00, 0x03
 };
 
 static uint8_t service_uuid[16] = {
-    0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0xF0, 0xFF, 0x00, 0x00,
+    0x23, 0xF1, 0xB3, 0x12, 0x8F, 0xA1, 0xFA, 0x83,
+    0xD1, 0x42, 0xCA, 0xFF, 0xB3, 0x3E, 0x61, 0x33
 };
 
 static esp_ble_adv_data_t adv_config = {
@@ -273,6 +282,7 @@ static StaticEventGroup_t ble_event_group_buffer;
 static volatile bool ble_secured = false;
 // Allows runtime control over whether we accept/ initiate pairing/bonding
 static volatile bool ble_pairing_allowed = true; 
+static volatile bool vhos_service_ready = false;
 // Store last remote address to initiate encryption later if user enables pairing mid-connection
 static esp_bd_addr_t ble_last_remote_bda = {0};
 
@@ -362,12 +372,6 @@ static esp_gatt_if_t spp_gatts_if = 0xff;
 static uint16_t ble_max_data_size = 20;
 static bool is_connected = false;
 static uint8_t test1[] __attribute__((unused)) = {0x66 ,0x33 ,0x22 ,0x11 ,0xBB ,0x00 ,0x00 ,0x00 ,0x11 ,0x00 ,0x00 ,0x00 ,0x33 ,0x00 ,0x00 ,0x00 ,0xA4 ,0x3C ,0xD9 ,0x49};
-
-// BLE cmdline input buffer/state
-static char* ble_cmdline_inbuf = NULL;
-static size_t ble_cmdline_inlen = 0;
-
-
 
 // Handle tables for each service
 static uint16_t dev_info_profile_handle_table[DEVICE_INFO_IDX_NB];
@@ -469,15 +473,15 @@ static const esp_gatts_attr_db_t device_info_attr_db[DEVICE_INFO_IDX_NB] = {
       sizeof(reg_cert_data), sizeof(reg_cert_data), (uint8_t *)reg_cert_data}},
 };
 
-// FFF0 service attribute database with built-in CLI characteristics
+// VHOS service attribute database. Names retain the upstream FFF0 handle-table prefix.
 static const esp_gatts_attr_db_t fff0_attr_db[FFF0_IDX_NB] = {
     // Service Declaration
     [IDX_SVC_FFF0] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid,
       ESP_GATT_PERM_READ,
-      sizeof(uint16_t), sizeof(uint16_t),
-      (uint8_t *)&GATTS_SERVICE_UUID_FFF0}},
+      sizeof(VHOS_SERVICE_UUID), sizeof(VHOS_SERVICE_UUID),
+      (uint8_t *)VHOS_SERVICE_UUID}},
     [IDX_CHAR_FFF1_DECL] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
@@ -486,9 +490,9 @@ static const esp_gatts_attr_db_t fff0_attr_db[FFF0_IDX_NB] = {
       (uint8_t *)&char_prop_notify_indicate}},
     [IDX_CHAR_FFF1_VAL] =
     {{ESP_GATT_AUTO_RSP},
-     {ESP_UUID_LEN_16, (uint8_t *)&(uint16_t){GATTS_CHAR_UUID_FFF1},
+     {ESP_UUID_LEN_128, (uint8_t *)VHOS_STREAM_UUID,
       ESP_GATT_PERM_READ_ENC_MITM,
-      20, sizeof(char_value_dummy), (uint8_t *)char_value_dummy}},
+      BLE_SEND_BUF_SIZE, 0, NULL}},
     [IDX_CHAR_FFF1_CCCD] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&client_char_config_uuid,
@@ -503,33 +507,38 @@ static const esp_gatts_attr_db_t fff0_attr_db[FFF0_IDX_NB] = {
       (uint8_t *)&(uint8_t){ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR}}},
     [IDX_CHAR_FFF2_VAL] =
     {{ESP_GATT_AUTO_RSP},
-     {ESP_UUID_LEN_16, (uint8_t *)&(uint16_t){GATTS_CHAR_UUID_FFF2},
+     {ESP_UUID_LEN_128, (uint8_t *)VHOS_COMMAND_UUID,
       ESP_GATT_PERM_WRITE_ENC_MITM,
-      20, 0, NULL}},
-    [IDX_CHAR_CLI_OUT_DECL] =
+      BLE_CMDLINE_MAX, 0, NULL}},
+    [IDX_CHAR_STATUS_DECL] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
       ESP_GATT_PERM_READ,
       sizeof(uint8_t), sizeof(char_prop_notify_indicate), (uint8_t *)&char_prop_notify_indicate}},
-    [IDX_CHAR_CLI_OUT_VAL] =
+    [IDX_CHAR_STATUS_VAL] =
     {{ESP_GATT_AUTO_RSP},
-     {ESP_UUID_LEN_128, (uint8_t *)CMD_OUT_CHAR_UUID,
+     {ESP_UUID_LEN_128, (uint8_t *)VHOS_STATUS_UUID,
       ESP_GATT_PERM_READ_ENC_MITM,
-      BLE_SEND_BUF_SIZE, sizeof(char_value_dummy), (uint8_t *)char_value_dummy}},
-    [IDX_CHAR_CLI_OUT_CCCD] =
+      BLE_SEND_BUF_SIZE, 0, NULL}},
+    [IDX_CHAR_STATUS_CCCD] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&client_char_config_uuid,
       ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM,
       sizeof(uint16_t), sizeof(heart_measurement_ccc), (uint8_t *)heart_measurement_ccc}},
-    [IDX_CHAR_CLI_IN_DECL] =
+    [IDX_CHAR_OTA_STATUS_DECL] =
     {{ESP_GATT_AUTO_RSP},
      {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
-      sizeof(uint8_t), sizeof(uint8_t), (uint8_t *)&(uint8_t){ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR}}},
-    [IDX_CHAR_CLI_IN_VAL] =
+      sizeof(uint8_t), sizeof(char_prop_notify_indicate), (uint8_t *)&char_prop_notify_indicate}},
+    [IDX_CHAR_OTA_STATUS_VAL] =
     {{ESP_GATT_AUTO_RSP},
-     {ESP_UUID_LEN_128, (uint8_t *)CMD_IN_CHAR_UUID,
-      ESP_GATT_PERM_WRITE_ENC_MITM,
-      BLE_CMDLINE_MAX, 0, NULL}},
+     {ESP_UUID_LEN_128, (uint8_t *)VHOS_OTA_STATUS_UUID,
+      ESP_GATT_PERM_READ_ENC_MITM,
+      BLE_SEND_BUF_SIZE, 0, NULL}},
+    [IDX_CHAR_OTA_STATUS_CCCD] =
+    {{ESP_GATT_AUTO_RSP},
+     {ESP_UUID_LEN_16, (uint8_t *)&client_char_config_uuid,
+      ESP_GATT_PERM_READ_ENC_MITM | ESP_GATT_PERM_WRITE_ENC_MITM,
+      sizeof(uint16_t), sizeof(heart_measurement_ccc), (uint8_t *)heart_measurement_ccc}},
 };
 
 static const esp_gatts_attr_db_t spp_attr_db[SPP_IDX_NB] __attribute__((unused)) = {
@@ -839,8 +848,6 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
                                         esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
-    // removed unused rsp to avoid warnings
-    static xdev_buffer rx_buffer;
     ESP_LOGV(GATTS_TABLE_TAG, "event = %x\n",event);
     switch (event) {
         case ESP_GATTS_REG_EVT:
@@ -859,106 +866,20 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_WRITE_EVT, write value:");
             ESP_LOG_BUFFER_HEX(GATTS_TABLE_TAG, param->write.value, param->write.len);
 
-            if (param->write.handle == fff0_profile_handle_table[IDX_CHAR_CLI_IN_VAL]) {
+            if (param->write.handle == fff0_profile_handle_table[IDX_CHAR_FFF2_VAL]) {
                 if(!ble_secured) {
-                    ESP_LOGW(GATTS_TABLE_TAG, "CLI write rejected: link not securely paired yet");
+                    ESP_LOGW(GATTS_TABLE_TAG, "VHOS command rejected: link not securely paired yet");
                     break;
                 }
-                // Handle Prepare Write (long write) by accumulating into input buffer
-                if (param->write.is_prep) {
-                    size_t end = (size_t)param->write.offset + (size_t)param->write.len;
-                    if (end <= (BLE_CMDLINE_MAX - 1)) {
-                        memcpy(&ble_cmdline_inbuf[param->write.offset], param->write.value, param->write.len);
-                        if (end > ble_cmdline_inlen) ble_cmdline_inlen = end;
-                        ble_cmdline_inbuf[ble_cmdline_inlen] = '\0';
-                        ESP_LOGI(GATTS_TABLE_TAG, "Prepared write chunk, offset=%u, len=%u, total=%u", param->write.offset, param->write.len, (unsigned)ble_cmdline_inlen);
-                    } else {
-                        ESP_LOGE(GATTS_TABLE_TAG, "Prepared write overflow (end=%u > max=%u)", (unsigned)end, (unsigned)(BLE_CMDLINE_MAX - 1));
-                    }
-                } else {
-                    // Accumulate bytes until newline, then execute console command
-                    if (param->write.len > 0) {
-                        size_t to_copy = param->write.len;
-                        if (to_copy > (BLE_CMDLINE_MAX - 1 - ble_cmdline_inlen)) {
-                            to_copy = BLE_CMDLINE_MAX - 1 - ble_cmdline_inlen;
-                        }
-                        if (to_copy > 0) {
-                            memcpy(&ble_cmdline_inbuf[ble_cmdline_inlen], param->write.value, to_copy);
-                            ble_cmdline_inlen += to_copy;
-                            ble_cmdline_inbuf[ble_cmdline_inlen] = '\0';
-                        }
-
-                        // Process complete lines (terminated by \r or \n)
-                        size_t line_start = 0;
-                        for (size_t i = 0; i < ble_cmdline_inlen; i++) {
-                            char c = ble_cmdline_inbuf[i];
-                            if (c == '\r' || c == '\n') {
-                                ble_cmdline_inbuf[i] = '\0';
-                                if (i > line_start) {
-                                    const char *cmd = &ble_cmdline_inbuf[line_start];
-                                    ESP_LOGI(GATTS_TABLE_TAG, "BLE CMD: %s", cmd);
-                                    cmdline_run_on_ble(cmd);
-                                }
-                                // Skip consecutive CR/LF
-                                line_start = i + 1;
-                            }
-                        }
-                        // Shift any remaining partial command to start
-                        if (line_start > 0) {
-                            size_t remaining = ble_cmdline_inlen - line_start;
-                            if (remaining > 0) {
-                                memmove(ble_cmdline_inbuf, &ble_cmdline_inbuf[line_start], remaining);
-                            }
-                            ble_cmdline_inlen = remaining;
-                            ble_cmdline_inbuf[ble_cmdline_inlen] = '\0';
-                        }
-                    }
-                    // Send prompt
-                    cmdline_print_prompt_on_ble();
+                esp_err_t ingest_result = vhos_transport_ingest(param->write.value, param->write.len);
+                if (ingest_result != ESP_OK) {
+                    ESP_LOGW(GATTS_TABLE_TAG, "VHOS command rejected: %s", esp_err_to_name(ingest_result));
                 }
-            } else {
-                ESP_LOGI(GATTS_TABLE_TAG, "Write to characteristic (handle: 0x%04x)", param->write.handle);
-                memcpy(rx_buffer.ucElement, param->write.value, param->write.len);
-                rx_buffer.dev_channel = DEV_BLE;
-                rx_buffer.usLen = param->write.len;
-                xQueueSend(*xBle_RX_Queue, ( void * ) &rx_buffer, portMAX_DELAY );
-                ESP_LOGI(GATTS_TABLE_TAG, "writing value:");
-                ESP_LOG_BUFFER_HEX(GATTS_TABLE_TAG, param->write.value, param->write.len);
             }
             break;
         case ESP_GATTS_EXEC_WRITE_EVT:
-            ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_EXEC_WRITE_EVT");
-            if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC) {
-                // Process any complete lines in the prepared buffer
-                size_t line_start = 0;
-                for (size_t i = 0; i < ble_cmdline_inlen; i++) {
-                    char c = ble_cmdline_inbuf[i];
-                    if (c == '\r' || c == '\n') {
-                        ble_cmdline_inbuf[i] = '\0';
-                        if (i > line_start) {
-                            const char *cmd = &ble_cmdline_inbuf[line_start];
-                            ESP_LOGI(GATTS_TABLE_TAG, "BLE PREP CMD: %s", cmd);
-                            cmdline_run_on_ble(cmd);
-                        }
-                        line_start = i + 1;
-                    }
-                }
-                // If no newline, treat entire buffer as one command
-                if (line_start == 0 && ble_cmdline_inlen > 0) {
-                    ble_cmdline_inbuf[ble_cmdline_inlen] = '\0';
-                    ESP_LOGI(GATTS_TABLE_TAG, "BLE PREP CMD (no NL): %s", ble_cmdline_inbuf);
-                    cmdline_run_on_ble(ble_cmdline_inbuf);
-                }
-                // Reset buffer
-                ble_cmdline_inlen = 0;
-                ble_cmdline_inbuf[0] = '\0';
-                // Send prompt
-                cmdline_print_prompt_on_ble();
-            } else {
-                // Cancel prepared write
-                ble_cmdline_inlen = 0;
-                ble_cmdline_inbuf[0] = '\0';
-            }
+            ESP_LOGW(GATTS_TABLE_TAG, "Prepared writes are not part of the VHOS command contract");
+            vhos_transport_reset();
             break;
         case ESP_GATTS_MTU_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_MTU_EVT");
@@ -1027,10 +948,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
                 ESP_LOGI(GATTS_TABLE_TAG, "Pairing disabled: not initiating encryption on connect");
             }
 
-            // Route console output to BLE and print prompt
-            cmdline_set_ble_output_func(ble_cmdline_output);
-            ble_cmdline_inlen = 0;
-            cmdline_print_prompt_on_ble();
+            vhos_transport_reset();
             break;
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_DISCONNECT_EVT, disconnect reason 0x%x", param->disconnect.reason);
@@ -1045,9 +963,6 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
             #endif
             /* start advertising again when missing the connect */
             esp_ble_gap_start_advertising(&heart_rate_adv_params);
-            // Stop routing console output to BLE
-            cmdline_set_ble_output_func(NULL);
-            ble_cmdline_inlen = 0;
             break;
         case ESP_GATTS_OPEN_EVT:
             ESP_LOGI(GATTS_TABLE_TAG, "ESP_GATTS_OPEN_EVT");
@@ -1102,7 +1017,17 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event,
                     {
                         memcpy(fff0_profile_handle_table, param->add_attr_tab.handles,
                             sizeof(fff0_profile_handle_table));
-                        esp_ble_gatts_start_service(fff0_profile_handle_table[IDX_SVC_FFF0]);
+                        esp_err_t start_result = esp_ble_gatts_start_service(
+                            fff0_profile_handle_table[IDX_SVC_FFF0]);
+                        if (start_result == ESP_OK)
+                        {
+                            vhos_service_ready = true;
+                        }
+                        else
+                        {
+                            ESP_LOGE(GATTS_TABLE_TAG, "Unable to start VHOS service: %s",
+                                     esp_err_to_name(start_result));
+                        }
                     }
                     else
                     {
@@ -1313,23 +1238,41 @@ void ble_send(uint8_t* buf, uint8_t buf_len)
     }
 }
 
-// Send console output over BLE (CLI OUT in FFF0), chunked by MTU
-static void ble_cmdline_output(const char *data, size_t len)
+static esp_err_t vhos_ble_emit(const uint8_t *data, size_t len, bool health_channel)
 {
-    if (!is_connected || spp_gatts_if == ESP_GATT_IF_NONE) return;
+    if (!is_connected || spp_gatts_if == ESP_GATT_IF_NONE || data == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint16_t handle = health_channel
+        ? fff0_profile_handle_table[IDX_CHAR_STATUS_VAL]
+        : fff0_profile_handle_table[IDX_CHAR_FFF1_VAL];
     size_t offset = 0;
     while (offset < len) {
-        int tries = 0;
-        while (!ble_tx_ready() && tries++ < 100) {
+        uint32_t waits = 0;
+        while (!ble_tx_ready() && waits++ < 100) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
+        if (!ble_tx_ready()) {
+            return ESP_ERR_TIMEOUT;
+        }
         size_t chunk = len - offset;
-        if (chunk > ble_max_data_size) chunk = ble_max_data_size;
-        esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id,
-            fff0_profile_handle_table[IDX_CHAR_CLI_OUT_VAL], (uint16_t)chunk,
-            (uint8_t*)(data + offset), false);
+        if (chunk > ble_max_data_size) {
+            chunk = ble_max_data_size;
+        }
+        esp_err_t result = esp_ble_gatts_send_indicate(
+            spp_gatts_if,
+            spp_conn_id,
+            handle,
+            (uint16_t)chunk,
+            (uint8_t *)(data + offset),
+            false
+        );
+        if (result != ESP_OK) {
+            return result;
+        }
         offset += chunk;
     }
+    return ESP_OK;
 }
 
 static uint32_t ble_pass_key = 0;
@@ -1354,21 +1297,13 @@ void ble_init(QueueHandle_t *xTXp_Queue, QueueHandle_t *xRXp_Queue, uint8_t conn
     {
         xBle_RX_Queue = xRXp_Queue;
     }
+    vhos_transport_init((const char *)uid, vhos_ble_emit);
 
     if(s_ble_event_group == NULL)
     {
         s_ble_event_group = xEventGroupCreateStatic(&ble_event_group_buffer);
     }
 
-    if(ble_cmdline_inbuf == NULL)
-    {
-        ble_cmdline_inbuf = heap_caps_malloc(BLE_CMDLINE_MAX, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-        if(ble_cmdline_inbuf == NULL)
-        {
-            ESP_LOGE(GATTS_TABLE_TAG, "Failed to allocate memory for BLE command line input buffer");
-            return;
-        }
-    }
     xEventGroupClearBits(s_ble_event_group, BLE_CONNECTED_BIT);
     dev_status_clear_bits(DEV_BLE_CONNECTED_BIT);
     xEventGroupClearBits(s_ble_event_group, BLE_CONGEST_BIT);
@@ -1383,6 +1318,7 @@ void ble_enable(void)
         ESP_LOGW(GATTS_TABLE_TAG, "BLE already enabled");
         return;
     }
+    vhos_service_ready = false;
     
     // Initialize and enable Bluetooth controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -1487,6 +1423,9 @@ void ble_enable(void)
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &init_key, sizeof(uint8_t));
     esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &rsp_key, sizeof(uint8_t));
 
+    // VHOS emits framed data directly. The upstream raw ELM/CAN queue must never
+    // be copied into the VHOS stream characteristic.
+#if !VHOS_FIRMWARE
     // Create BLE task if not already created
     if(xble_handle == NULL)
    
@@ -1520,6 +1459,7 @@ void ble_enable(void)
             return;
         }
     }
+#endif
     dev_status_set_bits(DEV_BLE_ENABLED_BIT);
 }
 
@@ -1534,6 +1474,7 @@ void ble_disable(void)
     esp_bluedroid_deinit();
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
+    vhos_service_ready = false;
     dev_status_clear_bits(DEV_BLE_ENABLED_BIT);
     dev_status_clear_bits(DEV_BLE_CONNECTED_BIT);
 }
@@ -1560,4 +1501,9 @@ void ble_pairing_disable(void)
 bool ble_pairing_is_enabled(void)
 {
     return ble_pairing_allowed;
+}
+
+bool ble_vhos_service_ready(void)
+{
+    return vhos_service_ready;
 }
