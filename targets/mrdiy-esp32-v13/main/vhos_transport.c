@@ -98,11 +98,11 @@ static esp_err_t send_handshake(void)
         "{\"active_config_id\":\"mrdiy-v13-passive-500k\","
         "\"active_config_version\":\"0.1.0\","
         "\"bootloader_version\":\"esp-idf-5.5.3\","
-        "\"capabilities\":[\"ota.ab\",\"ota.rollback-self-test\"],"
+        "\"capabilities\":[\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"],"
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.5\","
+        "\"firmware_version\":\"0.1.0-dev.6\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -139,7 +139,7 @@ esp_err_t vhos_transport_send_health(void)
         "\"listen_only\":true,"
         "\"observed_at\":\"monotonic_us:%llu\","
         "\"received_frames\":%llu,"
-        "\"storage_free_bytes\":0,"
+        "\"storage_free_bytes\":null,"
         "\"supply_millivolts\":null,"
         "\"vehicle_motion\":\"UNKNOWN\"}",
         (unsigned long long)health.bus_error_count,

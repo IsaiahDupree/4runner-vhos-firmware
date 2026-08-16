@@ -47,6 +47,14 @@ static uint16_t ota_status_value_handle;
 static bool stream_notify_enabled;
 static bool status_notify_enabled;
 static bool link_encrypted;
+static bool host_ready;
+static bool advertising_active;
+static bool connection_parameters_available;
+static uint16_t active_att_mtu;
+static uint16_t active_connection_interval;
+static uint16_t active_connection_latency;
+static uint16_t active_supervision_timeout;
+static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t tx_queue;
 static SemaphoreHandle_t ready_semaphore;
 static struct ble_npl_callout advertising_retry_callout;
@@ -166,9 +174,11 @@ static void tx_task(void *argument)
         if (xQueueReceive(tx_queue, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        portENTER_CRITICAL(&state_lock);
         bool subscribed = item.health_channel ? status_notify_enabled : stream_notify_enabled;
         uint16_t value_handle = item.health_channel ? status_value_handle : stream_value_handle;
         uint16_t active_connection = connection_handle;
+        portEXIT_CRITICAL(&state_lock);
         if (!subscribed || active_connection == BLE_HS_CONN_HANDLE_NONE) {
             continue;
         }
@@ -211,7 +221,11 @@ static void health_task(void *argument)
     (void)argument;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(2000));
-        if (connection_handle != BLE_HS_CONN_HANDLE_NONE && link_encrypted && status_notify_enabled) {
+        portENTER_CRITICAL(&state_lock);
+        bool can_send = connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+                        link_encrypted && status_notify_enabled;
+        portEXIT_CRITICAL(&state_lock);
+        if (can_send) {
             esp_err_t result = vhos_transport_send_health();
             if (result != ESP_OK && result != ESP_ERR_NO_MEM) {
                 ESP_LOGW(TAG, "Health queue failed: %s", esp_err_to_name(result));
@@ -250,6 +264,12 @@ static void log_connection_parameters(uint16_t handle, const char *phase)
         ESP_LOGW(TAG, "BLE_CONN_PARAMS_%s unavailable rc=%d", phase, result);
         return;
     }
+    portENTER_CRITICAL(&state_lock);
+    connection_parameters_available = true;
+    active_connection_interval = description.conn_itvl;
+    active_connection_latency = description.conn_latency;
+    active_supervision_timeout = description.supervision_timeout;
+    portEXIT_CRITICAL(&state_lock);
     ESP_LOGI(
         TAG,
         "BLE_CONN_PARAMS_%s interval_units=%u latency=%u supervision_units=%u",
@@ -291,8 +311,13 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            portENTER_CRITICAL(&state_lock);
             connection_handle = event->connect.conn_handle;
             link_encrypted = false;
+            advertising_active = false;
+            connection_parameters_available = false;
+            active_att_mtu = 0;
+            portEXIT_CRITICAL(&state_lock);
             if (connection_handle <= ESP_BLE_PWR_TYPE_CONN_HDL8) {
                 esp_err_t power_result = esp_ble_tx_power_set(
                     (esp_ble_power_type_t)connection_handle,
@@ -316,10 +341,17 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "IPHONE_LINK_DISCONNECTED reason=%d", event->disconnect.reason);
+        portENTER_CRITICAL(&state_lock);
         connection_handle = BLE_HS_CONN_HANDLE_NONE;
         link_encrypted = false;
         stream_notify_enabled = false;
         status_notify_enabled = false;
+        connection_parameters_available = false;
+        active_att_mtu = 0;
+        active_connection_interval = 0;
+        active_connection_latency = 0;
+        active_supervision_timeout = 0;
+        portEXIT_CRITICAL(&state_lock);
         vhos_transport_reset();
         schedule_advertising();
         return 0;
@@ -330,18 +362,26 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         }
         return 0;
     case BLE_GAP_EVENT_MTU:
+        portENTER_CRITICAL(&state_lock);
+        active_att_mtu = event->mtu.value;
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(TAG, "BLE_MTU value=%u", event->mtu.value);
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
+        portENTER_CRITICAL(&state_lock);
+        advertising_active = false;
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGW(TAG, "BLE advertising completed: reason=%d", event->adv_complete.reason);
         schedule_advertising();
         return 0;
     case BLE_GAP_EVENT_SUBSCRIBE:
+        portENTER_CRITICAL(&state_lock);
         if (event->subscribe.attr_handle == stream_value_handle) {
             stream_notify_enabled = event->subscribe.cur_notify;
         } else if (event->subscribe.attr_handle == status_value_handle) {
             status_notify_enabled = event->subscribe.cur_notify;
         }
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(
             TAG,
             "BLE_SUBSCRIBE handle=%u notify=%d",
@@ -350,7 +390,9 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         );
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE:
+        portENTER_CRITICAL(&state_lock);
         link_encrypted = event->enc_change.status == 0;
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(TAG, "BLE_ENCRYPTION status=%d", event->enc_change.status);
         return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -411,9 +453,15 @@ static void advertise(void)
         NULL
     );
     if (result != 0) {
+        portENTER_CRITICAL(&state_lock);
+        advertising_active = false;
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGE(TAG, "Advertising start failed: rc=%d", result);
         schedule_advertising();
     } else {
+        portENTER_CRITICAL(&state_lock);
+        advertising_active = true;
+        portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(
             TAG,
             "VHOS_BLE_ADVERTISING name=%s short_name=VHOS interval_units=48-96",
@@ -424,6 +472,16 @@ static void advertise(void)
 
 static void on_reset(int reason)
 {
+    portENTER_CRITICAL(&state_lock);
+    host_ready = false;
+    advertising_active = false;
+    connection_handle = BLE_HS_CONN_HANDLE_NONE;
+    link_encrypted = false;
+    stream_notify_enabled = false;
+    status_notify_enabled = false;
+    connection_parameters_available = false;
+    active_att_mtu = 0;
+    portEXIT_CRITICAL(&state_lock);
     ESP_LOGE(TAG, "NimBLE reset: reason=%d", reason);
 }
 
@@ -437,6 +495,9 @@ static void on_sync(void)
         ESP_LOGE(TAG, "BLE address setup failed: rc=%d", result);
         return;
     }
+    portENTER_CRITICAL(&state_lock);
+    host_ready = true;
+    portEXIT_CRITICAL(&state_lock);
     advertise();
     xSemaphoreGive(ready_semaphore);
 }
@@ -558,4 +619,25 @@ esp_err_t vhos_ble_wait_ready(TickType_t timeout)
         return ESP_ERR_INVALID_STATE;
     }
     return xSemaphoreTake(ready_semaphore, timeout) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+esp_err_t vhos_ble_get_health(vhos_ble_health_t *health)
+{
+    if (health == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&state_lock);
+    health->ready = host_ready;
+    health->advertising = advertising_active;
+    health->connected = connection_handle != BLE_HS_CONN_HANDLE_NONE;
+    health->encrypted = link_encrypted;
+    health->stream_subscribed = stream_notify_enabled;
+    health->health_subscribed = status_notify_enabled;
+    health->connection_parameters_available = connection_parameters_available;
+    health->att_mtu = active_att_mtu;
+    health->connection_interval_units = active_connection_interval;
+    health->connection_latency = active_connection_latency;
+    health->supervision_timeout_units = active_supervision_timeout;
+    portEXIT_CRITICAL(&state_lock);
+    return ESP_OK;
 }

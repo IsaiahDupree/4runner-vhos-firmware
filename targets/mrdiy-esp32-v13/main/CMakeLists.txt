@@ -15,8 +15,10 @@ idf_component_register(
         "main.c"
         "vhos_ble.c"
         "vhos_can.c"
+        "vhos_status_web.c"
         "vhos_transport.c"
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "status_page.html"
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE VHOS_BUILD_ID="${VHOS_BUILD_ID}")

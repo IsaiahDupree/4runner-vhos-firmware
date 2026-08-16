@@ -17,12 +17,12 @@ The pin assignment and 500 kbit/s factory default are traceable to the recovered
 device image and the upstream MrDIY CANaBus v1.3+ firmware. They do not, by
 themselves, prove a vehicle protocol.
 
-## First milestone
+## Gateway health foundation
 
 The image exposes the VHOS BLE service used by the iOS app and reports actual
 gateway health: received frames, controller drops, bus errors, bus-off transitions,
 and the enforced listen-only state. Supply voltage, motion, capture storage, protocol
-confirmation, active OBD queries, and Wi-Fi OTA remain unavailable until their real
+confirmation, active OBD queries, and Wi-Fi OTA upload remain unavailable until their real
 implementations land; the app therefore shows those states as unavailable or pending.
 
 The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rollback
@@ -31,14 +31,30 @@ already implemented.
 
 ## Wi-Fi access-point status
 
-Firmware `v0.1.0-dev.5` does not initialize Wi-Fi, advertise a SoftAP, run an HTTP server,
-or host a browser status page. Its live commissioning and health channel is BLE only. The
-public VHOS gateway provisioner is an internet-hosted desktop USB flasher; it is not served
-by this ESP32.
+Firmware `v0.1.0-dev.6` adds an authenticated, read-only commissioning surface at
+`http://192.168.4.1/`. During the first 15 minutes after boot, the gateway advertises a
+WPA2 SoftAP named `VHOS-STATUS-<chip-suffix>`. The HTTP server accepts only authenticated
+`GET` requests for the page, its versioned JSON evidence, and a health check. The per-device
+random password is created once, persisted in NVS, and printed only on the physical UART
+commissioning console.
 
-Any future local status page must report the same real health counters used by BLE, preserve
-the listen-only safety boundary, require authenticated access, and expose no arbitrary CAN
-transmit or diagnostic-command surface.
+The page resolves its values from the same live BLE and TWAI/CAN state used by the gateway
+transport. It reports firmware identity, uptime, reset reason, BLE link state, enforced
+listen-only state, CAN counters, storage/power availability, and A/B OTA/rollback state.
+It does not include configuration, reboot, erase, upload, diagnostic-command, or CAN-transmit
+routes. When the 15-minute boot window ends, the HTTP server and Wi-Fi radio stop while BLE
+and passive CAN observation continue.
+
+The internet-hosted VHOS gateway provisioner remains a separate desktop USB flasher; it is
+not served by the ESP32.
+
+Design, evidence, security, and operator rationale are maintained alongside the target:
+
+- [`docs/README.md`](docs/README.md) — documentation map and governing rules
+- [`docs/SOFTAP-STATUS-ARCHITECTURE.md`](docs/SOFTAP-STATUS-ARCHITECTURE.md) — system boundaries and data lineage
+- [`docs/SOFTAP-STATUS-API.md`](docs/SOFTAP-STATUS-API.md) — route and field contract
+- [`docs/SOFTAP-STATUS-SECURITY.md`](docs/SOFTAP-STATUS-SECURITY.md) — threat model and authority matrix
+- [`docs/SOFTAP-STATUS-OPERATIONS.md`](docs/SOFTAP-STATUS-OPERATIONS.md) — commissioning and acceptance procedure
 
 ## BLE commissioning
 

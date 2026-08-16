@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-release="${1:-v0.1.0-dev.5}"
+release="${1:-v0.1.0-dev.6}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 target_dir="${repo_root}/targets/mrdiy-esp32-v13"
 artifact="vhos-mrdiy-esp32-v13-${release}-merged.bin"
@@ -41,6 +41,7 @@ python3 "${repo_root}/tools/validate_vhos_release.py" \
   --source-commit "${source_commit}" \
   --bootloader-offset 0x1000 \
   --listen-only-source-dir "${target_dir}/main" \
+  --status-source-dir "${target_dir}/main" \
   --physical-recovery-status "${physical_recovery_status}"
 
 (

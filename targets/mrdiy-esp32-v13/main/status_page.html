@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VHOS Gateway Status</title>
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #08111f; color: #eaf2ff; }
+    main { width: min(1100px, 100%); margin: auto; padding: 28px 18px 52px; }
+    header { display: flex; gap: 18px; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+    h1 { margin: 0; font-size: clamp(28px, 6vw, 54px); letter-spacing: -0.04em; }
+    h2 { margin: 0 0 14px; font-size: 18px; color: #b9cced; }
+    p { line-height: 1.5; color: #9fb2d2; }
+    .badge { border: 1px solid #28527f; border-radius: 999px; padding: 8px 12px; color: #72d2ff; white-space: nowrap; }
+    .notice { padding: 14px 16px; border: 1px solid #443c18; background: #1c190b; border-radius: 14px; color: #f3d875; margin-bottom: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; }
+    section { background: #0e1b2e; border: 1px solid #1f3553; border-radius: 18px; padding: 18px; }
+    dl { margin: 0; }
+    .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 10px 0; border-top: 1px solid #1a2b43; }
+    .row:first-child { border-top: 0; }
+    dt { color: #91a5c6; }
+    dd { margin: 0; text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-width: 180px; overflow-wrap: anywhere; }
+    .pass { color: #55dfa0; }
+    .wait { color: #f3d875; }
+    .fail { color: #ff7185; }
+    .muted { color: #91a5c6; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #a9bddc; max-height: 380px; overflow: auto; }
+    footer { color: #6f85a8; padding-top: 22px; font-size: 13px; }
+    @media (max-width: 560px) { header { display: block; } .badge { display: inline-block; margin-top: 12px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>VHOS Gateway Status</h1>
+      <p>Local, authenticated, read-only evidence directly from this ESP32.</p>
+    </div>
+    <div id="connection" class="badge">WAITING FOR STATUS</div>
+  </header>
+  <div class="notice">This Wi-Fi and page stop automatically after the boot commissioning window. CAN remains listen-only and this page has no control endpoints.</div>
+  <div class="grid">
+    <section>
+      <h2>Gateway</h2>
+      <dl>
+        <div class="row"><dt>Gateway ID</dt><dd id="gateway-id">—</dd></div>
+        <div class="row"><dt>Firmware</dt><dd id="firmware">—</dd></div>
+        <div class="row"><dt>Build</dt><dd id="build">—</dd></div>
+        <div class="row"><dt>Uptime</dt><dd id="uptime">—</dd></div>
+        <div class="row"><dt>Reset reason</dt><dd id="reset">—</dd></div>
+        <div class="row"><dt>Free heap</dt><dd id="heap">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>SoftAP</h2>
+      <dl>
+        <div class="row"><dt>SSID</dt><dd id="ssid">—</dd></div>
+        <div class="row"><dt>Address</dt><dd id="ip">—</dd></div>
+        <div class="row"><dt>Stations</dt><dd id="stations">—</dd></div>
+        <div class="row"><dt>Expires in</dt><dd id="expires">—</dd></div>
+        <div class="row"><dt>Application auth</dt><dd id="auth">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>BLE transport</h2>
+      <dl>
+        <div class="row"><dt>Host ready</dt><dd id="ble-ready">—</dd></div>
+        <div class="row"><dt>Advertising</dt><dd id="ble-advertising">—</dd></div>
+        <div class="row"><dt>Connected</dt><dd id="ble-connected">—</dd></div>
+        <div class="row"><dt>Encrypted</dt><dd id="ble-encrypted">—</dd></div>
+        <div class="row"><dt>Stream subscribed</dt><dd id="ble-stream">—</dd></div>
+        <div class="row"><dt>Health subscribed</dt><dd id="ble-health">—</dd></div>
+        <div class="row"><dt>ATT MTU</dt><dd id="ble-mtu">—</dd></div>
+        <div class="row"><dt>Link parameters</dt><dd id="ble-params">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>OBD-II and vehicle bus</h2>
+      <dl>
+        <div class="row"><dt>Controller</dt><dd id="can-controller">—</dd></div>
+        <div class="row"><dt>Listen-only guard</dt><dd id="can-listen">—</dd></div>
+        <div class="row"><dt>Bus detected</dt><dd id="can-detected">—</dd></div>
+        <div class="row"><dt>Bitrate</dt><dd id="can-bitrate">—</dd></div>
+        <div class="row"><dt>Received frames</dt><dd id="can-received">—</dd></div>
+        <div class="row"><dt>Dropped frames</dt><dd id="can-dropped">—</dd></div>
+        <div class="row"><dt>Bus errors</dt><dd id="can-errors">—</dd></div>
+        <div class="row"><dt>Bus-off events</dt><dd id="can-off">—</dd></div>
+        <div class="row"><dt>OBD protocol</dt><dd id="obd">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>Storage and power</h2>
+      <dl>
+        <div class="row"><dt>Storage partition</dt><dd id="storage-partition">—</dd></div>
+        <div class="row"><dt>Storage capacity</dt><dd id="storage-total">—</dd></div>
+        <div class="row"><dt>Storage free</dt><dd id="storage-free">—</dd></div>
+        <div class="row"><dt>Gateway supply</dt><dd id="supply">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>OTA and authority</h2>
+      <dl>
+        <div class="row"><dt>Running slot</dt><dd id="ota-running">—</dd></div>
+        <div class="row"><dt>Boot slot</dt><dd id="ota-boot">—</dd></div>
+        <div class="row"><dt>Next update slot</dt><dd id="ota-next">—</dd></div>
+        <div class="row"><dt>Image state</dt><dd id="ota-state">—</dd></div>
+        <div class="row"><dt>Rollback enabled</dt><dd id="ota-rollback">—</dd></div>
+        <div class="row"><dt>HTTP authority</dt><dd id="authority">—</dd></div>
+      </dl>
+    </section>
+    <section>
+      <h2>Evidence snapshot</h2>
+      <pre id="evidence">Waiting for the first authenticated gateway snapshot.</pre>
+    </section>
+  </div>
+  <footer>VHOS status contract v1 · no cloud, cookies, analytics, CAN transmit, diagnostic request, configuration write, or OTA upload.</footer>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  const show = (id, value, state = "") => {
+    const element = byId(id);
+    element.textContent = value === null || value === undefined ? "UNAVAILABLE" : String(value);
+    element.className = state;
+  };
+  const flag = (id, value, yes = "YES", no = "NO") => show(id, value ? yes : no, value ? "pass" : "wait");
+  const bytes = value => value === null || value === undefined ? null : `${Number(value).toLocaleString()} B`;
+  const seconds = value => `${Math.max(0, Number(value))} s`;
+  async function refresh() {
+    try {
+      const response = await fetch("/api/v1/status", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const status = await response.json();
+      show("connection", "LIVE · READ ONLY", "badge pass");
+      show("gateway-id", status.gateway.gateway_id);
+      show("firmware", status.gateway.firmware_version, "pass");
+      show("build", status.gateway.firmware_build_id);
+      show("uptime", `${status.runtime.uptime_ms} ms`);
+      show("reset", status.runtime.reset_reason);
+      show("heap", bytes(status.runtime.free_heap_bytes));
+      show("ssid", status.softap.ssid);
+      show("ip", status.softap.ipv4);
+      show("stations", status.softap.connected_stations);
+      show("expires", seconds(status.softap.expires_in_seconds), status.softap.expires_in_seconds > 60 ? "pass" : "wait");
+      flag("auth", status.softap.authenticated, "VERIFIED", "FAILED");
+      flag("ble-ready", status.ble.ready, "READY", "NOT READY");
+      flag("ble-advertising", status.ble.advertising, "ACTIVE", "INACTIVE");
+      flag("ble-connected", status.ble.connected, "CONNECTED", "DISCONNECTED");
+      flag("ble-encrypted", status.ble.encrypted, "ENCRYPTED", "NOT ENCRYPTED");
+      flag("ble-stream", status.ble.stream_subscribed, "SUBSCRIBED", "NOT SUBSCRIBED");
+      flag("ble-health", status.ble.health_subscribed, "SUBSCRIBED", "NOT SUBSCRIBED");
+      show("ble-mtu", status.ble.att_mtu);
+      show("ble-params", status.ble.connection_interval_units === null ? null : `${status.ble.connection_interval_units} / ${status.ble.connection_latency} / ${status.ble.supervision_timeout_units}`);
+      flag("can-controller", status.vehicle_bus.controller_running, "RUNNING", "NOT RUNNING");
+      flag("can-listen", status.vehicle_bus.listen_only, "ENFORCED", "FAILED");
+      flag("can-detected", status.vehicle_bus.bus_detected, "DETECTED", "NOT DETECTED");
+      show("can-bitrate", `${Number(status.vehicle_bus.bitrate_bps).toLocaleString()} bps`);
+      show("can-received", status.vehicle_bus.received_frames);
+      show("can-dropped", status.vehicle_bus.dropped_frames, status.vehicle_bus.dropped_frames === 0 ? "pass" : "wait");
+      show("can-errors", status.vehicle_bus.bus_error_count, status.vehicle_bus.bus_error_count === 0 ? "pass" : "wait");
+      show("can-off", status.vehicle_bus.bus_off_count, status.vehicle_bus.bus_off_count === 0 ? "pass" : "fail");
+      show("obd", status.vehicle_bus.obd_protocol_confirmed ? status.vehicle_bus.obd_protocol : "UNCONFIRMED", status.vehicle_bus.obd_protocol_confirmed ? "pass" : "wait");
+      flag("storage-partition", status.storage.partition_present, "PRESENT", "NOT FOUND");
+      show("storage-total", bytes(status.storage.total_bytes));
+      show("storage-free", bytes(status.storage.free_bytes), status.storage.free_bytes === null ? "wait" : "pass");
+      show("supply", status.power.supply_available ? `${status.power.supply_millivolts} mV` : "UNAVAILABLE", status.power.supply_available ? "pass" : "wait");
+      show("ota-running", status.ota.running_partition);
+      show("ota-boot", status.ota.boot_partition);
+      show("ota-next", status.ota.next_update_partition);
+      show("ota-state", status.ota.running_image_state);
+      flag("ota-rollback", status.ota.rollback_enabled, "ENABLED", "DISABLED");
+      show("authority", status.safety.read_only_http && !status.safety.arbitrary_can_transmit_available ? "READ ONLY" : "CHECK", status.safety.read_only_http ? "pass" : "fail");
+      byId("evidence").textContent = JSON.stringify(status, null, 2);
+    } catch (error) {
+      show("connection", `STATUS ERROR · ${error.message}`, "badge fail");
+      byId("evidence").textContent = `No current gateway snapshot: ${error.message}`;
+    }
+  }
+  refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>

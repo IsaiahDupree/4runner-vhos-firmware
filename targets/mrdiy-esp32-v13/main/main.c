@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include "vhos_ble.h"
 #include "vhos_can.h"
+#include "vhos_status_web.h"
 #include "vhos_transport.h"
 
 static const char *TAG = "vhos_main";
@@ -56,12 +57,13 @@ void app_main(void)
 
     /* vhos_ble_start installs the transport emitter before this readiness gate. */
     ESP_ERROR_CHECK(vhos_ble_wait_ready(pdMS_TO_TICKS(5000)));
+    ESP_ERROR_CHECK(vhos_status_web_start(gateway_id));
     confirm_running_image();
 
     const esp_app_desc_t *description = esp_app_get_description();
     ESP_LOGI(
         TAG,
-        "VHOS_SELF_TEST_PASS firmware=%s build=%s gateway=%s target=mrdiy-v1.3+",
+        "VHOS_SELF_TEST_PASS firmware=%s build=%s gateway=%s target=mrdiy-v1.3+ softap_status=ready read_only=true",
         description->version,
         VHOS_BUILD_ID,
         gateway_id

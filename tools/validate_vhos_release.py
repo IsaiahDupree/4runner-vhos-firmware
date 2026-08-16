@@ -73,6 +73,51 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def validate_status_surface(source_dir: Path) -> str:
+    implementation = (source_dir / "vhos_status_web.c").read_text(encoding="utf-8")
+    header = (source_dir / "vhos_status_web.h").read_text(encoding="utf-8")
+    page = (source_dir / "status_page.html").read_text(encoding="utf-8")
+
+    required_fragments = {
+        "15-minute commissioning window": "VHOS_STATUS_WINDOW_SECONDS 900U" in header,
+        "WPA2 SoftAP": "WIFI_AUTH_WPA2_PSK" in implementation,
+        "protected management frames": "configuration.ap.pmf_cfg.required = true" in implementation,
+        "one-station limit": "configuration.ap.max_connection = 1" in implementation,
+        "NVS-backed credential": "VHOS_STATUS_NVS_PASSWORD_KEY" in implementation,
+        "HTTP Basic credential encoding": "mbedtls_base64_encode" in implementation,
+        "constant-time credential comparison": "constant_time_equal" in implementation,
+        "explicit read-only evidence flag": '"read_only_http", true' in implementation,
+    }
+    for control, present in required_fragments.items():
+        require(present, f"status surface is missing required control: {control}")
+
+    require(
+        implementation.count(".method = HTTP_GET") == 3,
+        "status surface must register exactly three GET routes",
+    )
+    forbidden_fragments = (
+        "HTTP_POST",
+        "HTTP_PUT",
+        "HTTP_DELETE",
+        "HTTP_PATCH",
+        "esp_restart",
+        "esp_ota_begin",
+        "esp_ota_write",
+        "nvs_erase_all",
+        "twai_transmit",
+    )
+    for fragment in forbidden_fragments:
+        require(fragment not in implementation, f"status surface contains forbidden authority: {fragment}")
+
+    page_lower = page.lower()
+    require("<form" not in page_lower, "status page contains a form")
+    require("http://" not in page_lower, "status page contains an external HTTP dependency")
+    require("https://" not in page_lower, "status page contains an external HTTPS dependency")
+    require("websocket" not in page_lower, "status page contains a WebSocket surface")
+    require('fetch("/api/v1/status"' in page, "status page does not poll the versioned local API")
+    return "passed"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release", required=True)
@@ -102,6 +147,7 @@ def main() -> None:
         default="not_run_no_hardware_connected",
     )
     parser.add_argument("--listen-only-source-dir", type=Path)
+    parser.add_argument("--status-source-dir", type=Path)
     args = parser.parse_args()
 
     require(
@@ -145,6 +191,10 @@ def main() -> None:
         require("TWAI_MODE_LISTEN_ONLY" in source_text, "listen-only TWAI mode is not enforced")
         require("twai_transmit" not in source_text, "target contains a TWAI transmit path")
         listen_only_check = "passed"
+
+    status_surface_check = "not_applicable"
+    if args.status_source_dir is not None:
+        status_surface_check = validate_status_surface(args.status_source_dir)
 
     flash_files = parse_flash_files(args.flasher_args)
     required_flash_offsets = {
@@ -202,6 +252,7 @@ def main() -> None:
             "rollbackConfiguration": "passed",
             "applicationFitsBothSlots": "passed",
             "listenOnlyNoTransmitPath": listen_only_check,
+            "authenticatedReadOnlyStatusSurface": status_surface_check,
             "physicalBackupFlashRollbackRestore": args.physical_recovery_status,
         },
         "partitions": partitions,
