@@ -2,6 +2,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include "esp_bt.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -10,8 +11,10 @@
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
+#include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
+#include "nimble/nimble_npl.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "os/os_mbuf.h"
@@ -37,8 +40,10 @@ static uint16_t status_value_handle;
 static uint16_t ota_status_value_handle;
 static bool stream_notify_enabled;
 static bool status_notify_enabled;
+static bool link_encrypted;
 static QueueHandle_t tx_queue;
 static SemaphoreHandle_t ready_semaphore;
+static struct ble_npl_callout advertising_retry_callout;
 
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(
     0x23, 0xf1, 0xb3, 0x12, 0x8f, 0xa1, 0xfa, 0x83,
@@ -111,21 +116,21 @@ static const struct ble_gatt_svc_def services[] = {
                 .uuid = &stream_uuid.u,
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
-                         BLE_GATT_CHR_F_NOTIFY,
+                         BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC,
                 .val_handle = &stream_value_handle,
             },
             {
                 .uuid = &status_uuid.u,
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
-                         BLE_GATT_CHR_F_NOTIFY,
+                         BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC,
                 .val_handle = &status_value_handle,
             },
             {
                 .uuid = &ota_status_uuid.u,
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
-                         BLE_GATT_CHR_F_NOTIFY,
+                         BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC,
                 .val_handle = &ota_status_value_handle,
             },
             {0},
@@ -190,7 +195,7 @@ static void health_task(void *argument)
     (void)argument;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(2000));
-        if (connection_handle != BLE_HS_CONN_HANDLE_NONE && status_notify_enabled) {
+        if (connection_handle != BLE_HS_CONN_HANDLE_NONE && link_encrypted && status_notify_enabled) {
             esp_err_t result = vhos_transport_send_health();
             if (result != ESP_OK && result != ESP_ERR_NO_MEM) {
                 ESP_LOGW(TAG, "Health queue failed: %s", esp_err_to_name(result));
@@ -201,6 +206,26 @@ static void health_task(void *argument)
 
 static void advertise(void);
 
+static void advertising_retry_event(struct ble_npl_event *event)
+{
+    (void)event;
+    advertise();
+}
+
+static void schedule_advertising(void)
+{
+    if (ble_gap_adv_active() || ble_npl_callout_is_active(&advertising_retry_callout)) {
+        return;
+    }
+    ble_npl_error_t result = ble_npl_callout_reset(
+        &advertising_retry_callout,
+        ble_npl_time_ms_to_ticks32(250)
+    );
+    if (result != BLE_NPL_OK) {
+        ESP_LOGE(TAG, "Unable to schedule BLE advertising retry: rc=%d", result);
+    }
+}
+
 static int gap_event(struct ble_gap_event *event, void *argument)
 {
     (void)argument;
@@ -208,21 +233,38 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             connection_handle = event->connect.conn_handle;
+            link_encrypted = false;
+            if (connection_handle <= ESP_BLE_PWR_TYPE_CONN_HDL8) {
+                esp_err_t power_result = esp_ble_tx_power_set(
+                    (esp_ble_power_type_t)connection_handle,
+                    ESP_PWR_LVL_P9
+                );
+                if (power_result != ESP_OK) {
+                    ESP_LOGW(
+                        TAG,
+                        "Unable to raise connection TX power: %s",
+                        esp_err_to_name(power_result)
+                    );
+                }
+            }
             ESP_LOGI(TAG, "IPHONE_LINK_CONNECTED handle=%u", connection_handle);
         } else {
-            advertise();
+            ESP_LOGW(TAG, "BLE connection attempt failed: status=%d", event->connect.status);
+            schedule_advertising();
         }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "IPHONE_LINK_DISCONNECTED reason=%d", event->disconnect.reason);
         connection_handle = BLE_HS_CONN_HANDLE_NONE;
+        link_encrypted = false;
         stream_notify_enabled = false;
         status_notify_enabled = false;
         vhos_transport_reset();
-        advertise();
+        schedule_advertising();
         return 0;
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        advertise();
+        ESP_LOGW(TAG, "BLE advertising completed: reason=%d", event->adv_complete.reason);
+        schedule_advertising();
         return 0;
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == stream_value_handle) {
@@ -238,6 +280,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         );
         return 0;
     case BLE_GAP_EVENT_ENC_CHANGE:
+        link_encrypted = event->enc_change.status == 0;
         ESP_LOGI(TAG, "BLE_ENCRYPTION status=%d", event->enc_change.status);
         return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -254,11 +297,19 @@ static int gap_event(struct ble_gap_event *event, void *argument)
 
 static void advertise(void)
 {
+    if (ble_gap_adv_active()) {
+        return;
+    }
+    static const uint8_t short_name[] = "VHOS";
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.uuids128 = (ble_uuid128_t *)&service_uuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
+    /* Keep an identity fallback in the primary packet, not only the scan response. */
+    fields.name = (uint8_t *)short_name;
+    fields.name_len = sizeof(short_name) - 1;
+    fields.name_is_complete = 0;
     int result = ble_gap_adv_set_fields(&fields);
     if (result != 0) {
         ESP_LOGE(TAG, "Advertising data failed: rc=%d", result);
@@ -279,6 +330,8 @@ static void advertise(void)
     struct ble_gap_adv_params parameters = {0};
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    parameters.itvl_min = 0x0030;
+    parameters.itvl_max = 0x0060;
     result = ble_gap_adv_start(
         own_address_type,
         NULL,
@@ -289,8 +342,13 @@ static void advertise(void)
     );
     if (result != 0) {
         ESP_LOGE(TAG, "Advertising start failed: rc=%d", result);
+        schedule_advertising();
     } else {
-        ESP_LOGI(TAG, "VHOS_BLE_ADVERTISING name=%s", name);
+        ESP_LOGI(
+            TAG,
+            "VHOS_BLE_ADVERTISING name=%s short_name=VHOS interval_units=48-96",
+            name
+        );
     }
 }
 
@@ -338,6 +396,34 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
     if (result != ESP_OK) {
         return result;
     }
+    esp_err_t default_power_result = esp_ble_tx_power_set(
+        ESP_BLE_PWR_TYPE_DEFAULT,
+        ESP_PWR_LVL_P9
+    );
+    esp_err_t advertising_power_result = esp_ble_tx_power_set(
+        ESP_BLE_PWR_TYPE_ADV,
+        ESP_PWR_LVL_P9
+    );
+    if (default_power_result != ESP_OK || advertising_power_result != ESP_OK) {
+        ESP_LOGW(
+            TAG,
+            "BLE TX power configuration incomplete: default=%s advertising=%s",
+            esp_err_to_name(default_power_result),
+            esp_err_to_name(advertising_power_result)
+        );
+    } else {
+        ESP_LOGI(TAG, "BLE_TX_POWER_READY default_dbm=9 advertising_dbm=9");
+    }
+    int callout_result = ble_npl_callout_init(
+        &advertising_retry_callout,
+        nimble_port_get_dflt_eventq(),
+        advertising_retry_event,
+        NULL
+    );
+    if (callout_result != 0) {
+        ESP_LOGE(TAG, "Unable to initialize BLE advertising retry: rc=%d", callout_result);
+        return ESP_FAIL;
+    }
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -363,9 +449,34 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
     }
 
     ble_store_config_init();
+    int our_security_records = 0;
+    int peer_security_records = 0;
+    int our_store_result = ble_store_util_count(
+        BLE_STORE_OBJ_TYPE_OUR_SEC,
+        &our_security_records
+    );
+    int peer_store_result = ble_store_util_count(
+        BLE_STORE_OBJ_TYPE_PEER_SEC,
+        &peer_security_records
+    );
+    if (our_store_result == 0 && peer_store_result == 0) {
+        ESP_LOGI(
+            TAG,
+            "BLE_BOND_STORE our_security_records=%d peer_security_records=%d",
+            our_security_records,
+            peer_security_records
+        );
+    } else {
+        ESP_LOGW(
+            TAG,
+            "Unable to inspect BLE bond store: our_rc=%d peer_rc=%d",
+            our_store_result,
+            peer_store_result
+        );
+    }
     nimble_port_freertos_init(host_task);
     if (xTaskCreate(tx_task, "vhos_ble_tx", 4096, NULL, 6, NULL) != pdPASS ||
-        xTaskCreate(health_task, "vhos_health", 3072, NULL, 5, NULL) != pdPASS) {
+        xTaskCreate(health_task, "vhos_health", 6144, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

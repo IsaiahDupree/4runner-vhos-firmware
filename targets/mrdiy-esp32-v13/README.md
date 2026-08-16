@@ -29,6 +29,20 @@ The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rol
 enabled. This is recovery groundwork, not a claim that a Wi-Fi OTA upload endpoint is
 already implemented.
 
+## BLE commissioning
+
+- Primary advertising includes the VHOS service UUID and short name; the full
+  `VHOS-MRDIY-<chip-id>` name is in the scan response.
+- Advertising and default connection transmit power are set to the classic ESP32's supported
+  +9 dBm level.
+- Evidence, health, and OTA notification subscriptions require an encrypted BLE link. On Apple
+  platforms, subscribing initiates system pairing before the versioned handshake is sent.
+- Boot evidence reports the real NimBLE bond-record counts. The firmware does not silently erase
+  bonds; if either side has a stale development key, forget VHOS on the phone and clear only the
+  backed-up gateway NVS partition before pairing again.
+- Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;
+  it does not create an unsupervised FreeRTOS retry task.
+
 ## Build
 
 ```bash
