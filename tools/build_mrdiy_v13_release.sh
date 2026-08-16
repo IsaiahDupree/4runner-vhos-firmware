@@ -43,7 +43,7 @@ python3 "${repo_root}/tools/validate_vhos_release.py" \
   --listen-only-source-dir "${target_dir}/main" \
   --physical-recovery-status "${physical_recovery_status}"
 
-sha256sum \
-  "${repo_root}/dist/${artifact}" \
-  "${repo_root}/dist/${ota_artifact}" \
-  > "${repo_root}/dist/SHA256SUMS-mrdiy-esp32-v13"
+(
+  cd "${repo_root}/dist"
+  sha256sum "${artifact}" "${ota_artifact}" > SHA256SUMS-mrdiy-esp32-v13
+)
