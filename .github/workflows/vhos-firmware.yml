@@ -20,6 +20,8 @@ jobs:
         shell: bash
         run: |
           source /opt/esp/idf/export.sh
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ln -s "$GITHUB_WORKSPACE" /project
           bash tools/build_vhos_release.sh v0.1.0-dev.1
       - uses: actions/upload-artifact@v4
         with:
