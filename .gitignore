@@ -1,5 +1,10 @@
 build/
 dist/
+device-backups/
+
+# Per-target ESP-IDF build output
+targets/*/build/
+targets/*/sdkconfig
 __pycache__/
 esp_idf_components/
 # Prerequisites

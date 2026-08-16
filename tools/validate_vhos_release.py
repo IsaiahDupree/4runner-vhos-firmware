@@ -15,9 +15,6 @@ from pathlib import Path
 ESP_IMAGE_MAGIC = 0xE9
 PARTITION_MAGIC = 0x50AA
 PARTITION_MD5_MAGIC = 0xEBEB
-REQUIRED_FLASH_OFFSETS = {0x0000, 0x8000, 0xD000, 0x10000}
-
-
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -86,6 +83,25 @@ def main() -> None:
     parser.add_argument("--artifact-url", required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--recovery-report", type=Path, required=True)
+    parser.add_argument("--sdkconfig", type=Path, default=Path("sdkconfig"))
+    parser.add_argument("--chip-family", default="ESP32-S3")
+    parser.add_argument("--hardware-family", default="WiCAN-OBD-PRO")
+    parser.add_argument(
+        "--hardware-revision",
+        default="verify physically; upstream firmware reports 1_53",
+    )
+    parser.add_argument("--upstream-tag", default="v4.50p")
+    parser.add_argument("--source-commit")
+    parser.add_argument("--bootloader-offset", type=lambda value: int(value, 0), default=0x0000)
+    parser.add_argument("--partition-offset", type=lambda value: int(value, 0), default=0x8000)
+    parser.add_argument("--otadata-offset", type=lambda value: int(value, 0), default=0xD000)
+    parser.add_argument("--app-offset", type=lambda value: int(value, 0), default=0x10000)
+    parser.add_argument(
+        "--physical-recovery-status",
+        choices=("passed", "not_run_no_hardware_connected"),
+        default="not_run_no_hardware_connected",
+    )
+    parser.add_argument("--listen-only-source-dir", type=Path)
     args = parser.parse_args()
 
     require(
@@ -93,8 +109,12 @@ def main() -> None:
         "release validation requires a clean repository so the firmware commit is exact",
     )
 
-    sdkconfig = Path("sdkconfig").read_text(encoding="utf-8")
-    require("CONFIG_IDF_TARGET=\"esp32s3\"" in sdkconfig, "target is not ESP32-S3")
+    sdkconfig = args.sdkconfig.read_text(encoding="utf-8")
+    expected_idf_target = "esp32s3" if args.chip_family == "ESP32-S3" else "esp32"
+    require(
+        f'CONFIG_IDF_TARGET="{expected_idf_target}"' in sdkconfig,
+        f"target is not {args.chip_family}",
+    )
     require(
         "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in sdkconfig,
         "bootloader rollback is disabled",
@@ -115,10 +135,30 @@ def main() -> None:
     )
     require(args.app.read_bytes()[0] == ESP_IMAGE_MAGIC, "application image has invalid magic")
 
+    listen_only_check = "not_applicable"
+    if args.listen_only_source_dir is not None:
+        source_files = list(args.listen_only_source_dir.glob("*.c")) + list(
+            args.listen_only_source_dir.glob("*.h")
+        )
+        require(source_files, "listen-only source directory is empty")
+        source_text = "\n".join(path.read_text(encoding="utf-8") for path in source_files)
+        require("TWAI_MODE_LISTEN_ONLY" in source_text, "listen-only TWAI mode is not enforced")
+        require("twai_transmit" not in source_text, "target contains a TWAI transmit path")
+        listen_only_check = "passed"
+
     flash_files = parse_flash_files(args.flasher_args)
-    require(REQUIRED_FLASH_OFFSETS.issubset(flash_files), "merged image is missing a required segment")
+    required_flash_offsets = {
+        args.bootloader_offset,
+        args.partition_offset,
+        args.otadata_offset,
+        args.app_offset,
+    }
+    require(required_flash_offsets.issubset(flash_files), "merged image is missing a required segment")
     merged = args.merged.read_bytes()
-    require(merged and merged[0] == ESP_IMAGE_MAGIC, "merged image has invalid bootloader magic")
+    require(
+        len(merged) > args.bootloader_offset and merged[args.bootloader_offset] == ESP_IMAGE_MAGIC,
+        "merged image has invalid bootloader magic",
+    )
     for address, source_path in flash_files.items():
         source = source_path.read_bytes()
         require(
@@ -127,7 +167,7 @@ def main() -> None:
         )
 
     firmware_commit = git("rev-parse", "HEAD")
-    upstream_commit = git("rev-list", "-n", "1", "v4.50p")
+    upstream_commit = args.source_commit or git("rev-list", "-n", "1", args.upstream_tag)
     published_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     artifact_hash = sha256(args.merged)
 
@@ -136,10 +176,10 @@ def main() -> None:
         "release": args.release,
         "channel": "development",
         "publishedAt": published_at,
-        "chipFamily": "ESP32-S3",
-        "hardwareFamily": "WiCAN-OBD-PRO",
-        "hardwareRevision": "verify physically; upstream firmware reports 1_53",
-        "upstreamTag": "v4.50p",
+        "chipFamily": args.chip_family,
+        "hardwareFamily": args.hardware_family,
+        "hardwareRevision": args.hardware_revision,
+        "upstreamTag": args.upstream_tag,
         "sourceCommit": upstream_commit,
         "firmwareCommit": firmware_commit,
         "espIdfVersion": "5.5.3",
@@ -156,12 +196,13 @@ def main() -> None:
         "generatedAt": published_at,
         "firmwareCommit": firmware_commit,
         "checks": {
-            "esp32s3Target": "passed",
+            "chipTarget": f"passed:{args.chip_family}",
             "mergedSegmentsByteExact": "passed",
             "otaABPartitionTopology": "passed",
             "rollbackConfiguration": "passed",
             "applicationFitsBothSlots": "passed",
-            "physicalBackupFlashRollbackRestore": "not_run_no_hardware_connected",
+            "listenOnlyNoTransmitPath": listen_only_check,
+            "physicalBackupFlashRollbackRestore": args.physical_recovery_status,
         },
         "partitions": partitions,
         "artifactSha256": artifact_hash,

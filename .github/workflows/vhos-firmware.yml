@@ -23,10 +23,11 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ln -s "$GITHUB_WORKSPACE" /project
           bash tools/build_vhos_release.sh v0.1.0-dev.1
+          bash tools/build_mrdiy_v13_release.sh v0.1.0-dev.2
       - uses: actions/upload-artifact@v4
         with:
-          name: vhos-wican-pro-esp32s3-development
+          name: vhos-gateway-development
           path: |
             dist/*.bin
             dist/*.json
-            dist/SHA256SUMS
+            dist/SHA256SUMS*
