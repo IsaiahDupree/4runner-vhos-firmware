@@ -59,7 +59,7 @@ void app_main(void)
     snprintf(
         device_name,
         sizeof(device_name),
-        "VHOS-MRDIY-%02X%02X%02X",
+        "VHOS-4R-OBD-%02X%02X%02X",
         mac[3], mac[4], mac[5]
     );
 

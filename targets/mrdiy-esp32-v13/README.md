@@ -52,6 +52,10 @@ obsolete bond records and rotates its BLE identity once. iOS therefore performs 
 discovery automatically instead of trapping the app in `VALIDATING` or requiring the owner to use
 “Forget This Device.” See [BLE GATT schema migration](docs/BLE-GATT-SCHEMA-MIGRATION.md).
 
+Firmware `v0.1.0-dev.14` adopts the stable owner-facing name
+`VHOS-4R-OBD-<MAC-suffix>`. It does not change the persisted BLE identity, bonds, complete
+handshake `gateway_id`, or existing evidence lineage.
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
@@ -95,7 +99,8 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 ## BLE commissioning
 
 - Primary advertising includes the VHOS service UUID and short name; the full
-  `VHOS-MRDIY-<chip-id>` name is in the scan response.
+  `VHOS-4R-OBD-<MAC-suffix>` name is in the scan response. The canonical name is a stable
+  owner-facing alias; the complete handshake `gateway_id` remains the immutable evidence identity.
 - Advertising and default connection transmit power are set to the classic ESP32's supported
   +9 dBm level.
 - Evidence, health, and OTA notification subscriptions require an encrypted BLE link. On Apple
