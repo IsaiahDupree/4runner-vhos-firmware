@@ -19,6 +19,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [Passive CAN flight recorder](PASSIVE-CAN-FLIGHT-RECORDER.md) | Offline capture, sampling, flash retention, record framing, resumable BLE transfer, iPhone storage, export, and field workflow. |
 | [Authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md) | Explicit encrypted-BLE activation, one-shot network credentials, signed image upload, A/B probationary boot, rollback, and acceptance gates. |
 | [dev12 physical flash record](FIELD-FLASH-2026-08-17-DEV12.md) | Device identity, private recovery-backup checksum, NVS-preserving segment plan, boot evidence, and remaining physical gates. |
+| [dev13 physical flash and GATT recovery record](FIELD-FLASH-2026-08-17-DEV13.md) | Signed segment flash, one-time identity migration, bond cleanup, independent macOS service enumeration, and remaining iPhone acceptance gate. |
 
 ## Governing rule
 
