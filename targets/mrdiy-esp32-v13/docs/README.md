@@ -20,6 +20,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [Authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md) | Explicit encrypted-BLE activation, one-shot network credentials, signed image upload, A/B probationary boot, rollback, and acceptance gates. |
 | [dev12 physical flash record](FIELD-FLASH-2026-08-17-DEV12.md) | Device identity, private recovery-backup checksum, NVS-preserving segment plan, boot evidence, and remaining physical gates. |
 | [dev13 physical flash and GATT recovery record](FIELD-FLASH-2026-08-17-DEV13.md) | Signed segment flash, one-time identity migration, bond cleanup, independent macOS service enumeration, and remaining iPhone acceptance gate. |
+| [dev14 physical flash and iPhone acceptance record](FIELD-FLASH-2026-08-17-DEV14.md) | Canonical device naming, recovery evidence, application-only flash boundary, boot proof, and real iPhone GATT/handshake/health acceptance. |
 
 ## Governing rule
 
@@ -66,3 +67,7 @@ surface and does not change the default-off Wi-Fi policy.
 `v0.1.0-dev.13` adds an NVS-persisted GATT schema version. A schema mismatch clears obsolete bond
 and CCCD records and rotates the random-static identity exactly once, forcing iOS to discover the
 new database automatically while preserving CAN captures and every unrelated storage namespace.
+
+`v0.1.0-dev.14` adopts the product-wide `VHOS-4R-OBD-<MAC suffix>` display name. The label is
+derived from silicon identity and does not replace the immutable gateway ID, rotate the persistent
+BLE identity, or modify stored bonds and evidence lineage.
