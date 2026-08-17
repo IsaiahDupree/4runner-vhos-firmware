@@ -13,6 +13,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [SoftAP status API](SOFTAP-STATUS-API.md) | Browser routes, JSON contract, field lineage, nullability, caching, and compatibility policy. |
 | [SoftAP security](SOFTAP-STATUS-SECURITY.md) | Threat model, authentication, credential lifecycle, attack-surface controls, and residual risks. |
 | [SoftAP operations and verification](SOFTAP-STATUS-OPERATIONS.md) | Connection procedure, physical test plan, failure diagnosis, acceptance evidence, and recovery. |
+| [BLE bond-loss recovery](BLE-BOND-LOSS-RECOVERY.md) | Persistent identity epochs, automatic recovery after NVS loss, failure behavior, and acceptance tests. |
 
 ## Governing rule
 
@@ -37,3 +38,8 @@ the Mac association test demonstrated that an automatically remembered no-intern
 disruptive. The service remains a development and commissioning surface, not a production remote-
 management interface. Later versions may add explicit encrypted-BLE activation or stronger
 transport security, but they must retain the read-only and no-arbitrary-transmit boundaries.
+
+`v0.1.0-dev.8` adds an NVS-persisted random-static BLE identity. If a full flash or NVS erase
+removes the gateway bond, that same erase removes the identity epoch and the next boot presents a
+new peripheral identity to iOS. This prevents an old iPhone bond from trapping commissioning in a
+connect, encryption-failure, disconnect loop.

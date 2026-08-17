@@ -121,6 +121,42 @@ def validate_status_surface(source_dir: Path) -> str:
     return "passed"
 
 
+def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
+    implementation_path = source_dir / "vhos_ble.c"
+    require(implementation_path.is_file(), "BLE identity recovery implementation is missing")
+    implementation = implementation_path.read_text(encoding="utf-8")
+
+    required_fragments = {
+        "NimBLE bond persistence": "CONFIG_BT_NIMBLE_NVS_PERSIST=y" in sdkconfig,
+        "dedicated identity namespace": 'VHOS_BLE_IDENTITY_NAMESPACE "vhos_ble_id"' in implementation,
+        "versioned identity key": 'VHOS_BLE_IDENTITY_KEY "identity_v1"' in implementation,
+        "static random identity generation": "ble_hs_id_gen_rnd(0, identity)" in implementation,
+        "identity NVS write": "nvs_set_blob(" in implementation,
+        "identity NVS commit": "nvs_commit(handle)" in implementation,
+        "random identity installation": "ble_hs_id_set_rnd(identity.val)" in implementation,
+        "random identity selection": "ble_hs_id_infer_auto(1, &own_address_type)" in implementation,
+        "repeat-pair recovery": "BLE_GAP_REPEAT_PAIRING_RETRY" in implementation,
+        "identity epoch evidence": "BLE_IDENTITY_READY type=random-static" in implementation,
+    }
+    for control, present in required_fragments.items():
+        require(present, f"BLE bond-loss recovery is missing required control: {control}")
+
+    require(
+        implementation.index("nvs_set_blob(") < implementation.index("nvs_commit(handle)"),
+        "BLE identity must be written before its NVS commit",
+    )
+    require(
+        implementation.index("generate_and_persist_identity(handle, &identity)")
+        < implementation.index("ble_hs_id_set_rnd(identity.val)"),
+        "generated BLE identity must be persisted before it is installed",
+    )
+    require(
+        "ble_hs_util_ensure_addr(0)" not in implementation,
+        "legacy public-address selection bypasses the identity epoch",
+    )
+    return "passed:persistent-random-static-identity-epoch"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release", required=True)
@@ -204,6 +240,15 @@ def main() -> None:
         )
         status_surface_check = "passed:compiled_source-default_off_release"
 
+    ble_bond_loss_recovery_check = "not_applicable"
+    if args.listen_only_source_dir is not None and (
+        args.listen_only_source_dir / "vhos_ble.c"
+    ).is_file():
+        ble_bond_loss_recovery_check = validate_ble_bond_loss_recovery(
+            args.listen_only_source_dir,
+            sdkconfig,
+        )
+
     flash_files = parse_flash_files(args.flasher_args)
     required_flash_offsets = {
         args.bootloader_offset,
@@ -260,6 +305,7 @@ def main() -> None:
             "rollbackConfiguration": "passed",
             "applicationFitsBothSlots": "passed",
             "listenOnlyNoTransmitPath": listen_only_check,
+            "bleBondLossIdentityRecovery": ble_bond_loss_recovery_check,
             "authenticatedReadOnlyStatusSurface": status_surface_check,
             "physicalBackupFlashRollbackRestore": args.physical_recovery_status,
         },

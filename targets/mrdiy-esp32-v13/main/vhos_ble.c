@@ -11,12 +11,13 @@
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
+#include "host/ble_hs_id.h"
 #include "host/ble_store.h"
 #include "host/ble_uuid.h"
-#include "host/util/util.h"
 #include "nimble/nimble_npl.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "nvs.h"
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -30,6 +31,8 @@
 #define VHOS_BLE_CONN_INTERVAL_MAX 40U
 #define VHOS_BLE_CONN_LATENCY 0U
 #define VHOS_BLE_SUPERVISION_TIMEOUT 600U
+#define VHOS_BLE_IDENTITY_NAMESPACE "vhos_ble_id"
+#define VHOS_BLE_IDENTITY_KEY "identity_v1"
 
 typedef struct {
     size_t length;
@@ -485,14 +488,127 @@ static void on_reset(int reason)
     ESP_LOGE(TAG, "NimBLE reset: reason=%d", reason);
 }
 
+static esp_err_t persist_identity(nvs_handle_t handle, const ble_addr_t *identity)
+{
+    esp_err_t result = nvs_set_blob(
+        handle,
+        VHOS_BLE_IDENTITY_KEY,
+        identity->val,
+        sizeof(identity->val)
+    );
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    return result;
+}
+
+static esp_err_t generate_and_persist_identity(
+    nvs_handle_t handle,
+    ble_addr_t *identity
+)
+{
+    int host_result = ble_hs_id_gen_rnd(0, identity);
+    if (host_result != 0) {
+        ESP_LOGE(TAG, "Unable to generate static random BLE identity: rc=%d", host_result);
+        return ESP_FAIL;
+    }
+    esp_err_t result = persist_identity(handle, identity);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to persist BLE identity: %s", esp_err_to_name(result));
+    }
+    return result;
+}
+
+static esp_err_t configure_persistent_identity(void)
+{
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(
+        VHOS_BLE_IDENTITY_NAMESPACE,
+        NVS_READWRITE,
+        &handle
+    );
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to open BLE identity store: %s", esp_err_to_name(result));
+        return result;
+    }
+
+    ble_addr_t identity = {
+        .type = BLE_ADDR_RANDOM,
+    };
+    size_t identity_length = sizeof(identity.val);
+    result = nvs_get_blob(
+        handle,
+        VHOS_BLE_IDENTITY_KEY,
+        identity.val,
+        &identity_length
+    );
+    bool generated = false;
+    if (result == ESP_ERR_NVS_NOT_FOUND ||
+        result == ESP_ERR_NVS_INVALID_LENGTH ||
+        (result == ESP_OK && identity_length != sizeof(identity.val))) {
+        ESP_LOGW(
+            TAG,
+            "BLE identity absent or invalid; creating a new bond epoch: result=%s length=%u",
+            esp_err_to_name(result),
+            (unsigned int)identity_length
+        );
+        result = generate_and_persist_identity(handle, &identity);
+        generated = result == ESP_OK;
+    } else if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to load BLE identity: %s", esp_err_to_name(result));
+    }
+
+    if (result == ESP_OK) {
+        int host_result = ble_hs_id_set_rnd(identity.val);
+        if (host_result != 0 && !generated) {
+            ESP_LOGW(
+                TAG,
+                "Persisted BLE identity rejected; rotating bond epoch: rc=%d",
+                host_result
+            );
+            result = generate_and_persist_identity(handle, &identity);
+            generated = result == ESP_OK;
+            if (result == ESP_OK) {
+                host_result = ble_hs_id_set_rnd(identity.val);
+            }
+        }
+        if (result == ESP_OK && host_result != 0) {
+            ESP_LOGE(TAG, "Unable to install BLE identity: rc=%d", host_result);
+            result = ESP_FAIL;
+        }
+    }
+
+    nvs_close(handle);
+    if (result != ESP_OK) {
+        return result;
+    }
+    ESP_LOGI(
+        TAG,
+        "BLE_IDENTITY_READY type=random-static source=%s address=%02x:%02x:%02x:%02x:%02x:%02x",
+        generated ? "generated" : "persisted",
+        identity.val[5],
+        identity.val[4],
+        identity.val[3],
+        identity.val[2],
+        identity.val[1],
+        identity.val[0]
+    );
+    return ESP_OK;
+}
+
 static void on_sync(void)
 {
-    int result = ble_hs_util_ensure_addr(0);
-    if (result == 0) {
-        result = ble_hs_id_infer_auto(0, &own_address_type);
-    }
+    esp_err_t identity_result = configure_persistent_identity();
+    int result = identity_result == ESP_OK
+        ? ble_hs_id_infer_auto(1, &own_address_type)
+        : BLE_HS_ESTORE_CAP;
     if (result != 0) {
-        ESP_LOGE(TAG, "BLE address setup failed: rc=%d", result);
+        ESP_LOGE(
+            TAG,
+            "BLE identity setup failed: identity=%s host_rc=%d",
+            esp_err_to_name(identity_result),
+            result
+        );
         return;
     }
     portENTER_CRITICAL(&state_lock);
