@@ -17,6 +17,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [Passive CAN discovery](PASSIVE-CAN-DISCOVERY.md) | Bounded 500/250-kbit listen-only probing, lock evidence, safety boundaries, and vehicle acceptance. |
 | [Passive CAN flight recorder](PASSIVE-CAN-FLIGHT-RECORDER.md) | Offline capture, sampling, flash retention, record framing, resumable BLE transfer, iPhone storage, export, and field workflow. |
 | [Authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md) | Explicit encrypted-BLE activation, one-shot network credentials, signed image upload, A/B probationary boot, rollback, and acceptance gates. |
+| [dev12 physical flash record](FIELD-FLASH-2026-08-17-DEV12.md) | Device identity, private recovery-backup checksum, NVS-preserving segment plan, boot evidence, and remaining physical gates. |
 
 ## Governing rule
 
