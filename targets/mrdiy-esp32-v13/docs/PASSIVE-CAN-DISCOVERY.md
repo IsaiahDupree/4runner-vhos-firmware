@@ -77,3 +77,24 @@ If both windows remain at zero with zero controller errors, inspect physical DLC
 transceiver power/standby, and vehicle wake state. If the physical CAN path is correct, move to the
 dedicated all-protocol interpreter workflow for ISO 9141-2, ISO 14230-4, or SAE J1850 candidates;
 this classic MrDIY CAN-only target cannot test those electrical transports.
+
+## First physical vehicle run — 2026-08-16
+
+Firmware commit `3cd94915beef42477289d0d65d274f5f7bf3d3a1` was flashed application-only at
+`0x10000` to ESP32 MAC `94:54:c5:b0:8d:14`. NVS was preserved. Boot reported firmware
+`v0.1.0-dev.10`, the persisted random-static identity `e3:2d:bd:5e:5d:ed`, local/peer bond records
+`1/1`, SoftAP disabled, and the listen-only probe ready.
+
+Serial evidence showed three successful transitions over more than one full cycle:
+
+```text
+500000 -> 250000: no valid frames in 10000 ms
+250000 -> 500000: no valid frames in 10000 ms
+500000 -> 250000: no valid frames in 10000 ms
+```
+
+The physical iPhone session independently verified the `dev.10` handshake and decoded health
+frames in every probe state with `received_frames=0` and no passive candidate. The accepted result
+is `INCONCLUSIVE / NO_PASSIVE_LOCK`, not an OBD-II rejection. The complete cross-layer record and
+next experiment are maintained in the Vehicle Health OS repository at
+`docs/development/PASSIVE-CAN-VEHICLE-RUN-2026-08-16.md`.
