@@ -104,3 +104,30 @@ owner records.
 
 Do not claim OBD-II protocol confirmation from this test. BLE transport acceptance and vehicle-bus
 evidence are separate gates.
+
+## Physical acceptance — 2026-08-16
+
+The recovery path was exercised with the real MrDIY gateway and paired iPhone 15.
+
+| Item | Evidence |
+| --- | --- |
+| Hardware | ESP32-D0WDQ6 revision 1.1, base MAC `94:54:c5:b0:8d:14`, USB `/dev/cu.usbserial-0001` |
+| Firmware | `v0.1.0-dev.9`, build `v4.50p-15-g40151a3f897e` |
+| Application image | SHA-256 `4c0ecb8f3767a8ed8d4fca1e3b6e1589e21e63a3910e949a904aa67ada0a944c` |
+| Flash scope | Application partition only at `0x10000`; esptool read-back hash verification passed |
+| BLE identity | `e3:2d:bd:5e:5d:ed`, source `persisted`, direct `own_addr_type=1` |
+| Core Bluetooth identity | New identifier `C4CD1D2B-FA38-FA6E-87D1-BFB46191FF95`; stale identifier began `1AF5AF93` |
+| Security | `BLE_ENCRYPTION status=0`; evidence, health, and OTA notification handles enabled |
+| Contract | iOS trace `HANDSHAKE_VERIFIED firmware=0.1.0-dev.9` |
+| Reboot persistence | Identity unchanged and `BLE_BOND_STORE our_security_records=1 peer_security_records=1` |
+| Wi-Fi policy | `VHOS_SOFTAP_DISABLED`; Wi-Fi/HTTP were not initialized |
+
+The first physical `dev.8` attempt correctly persisted an identity but selected NimBLE privacy
+addressing (`own_addr_type=3`). That hid the persisted epoch behind an RPA and reproduced the peer
+Security Manager error. `dev.9` intentionally selects the persisted random-static address directly
+(`own_addr_type=1`). The release validator now rejects a return to the privacy-address selection.
+
+This acceptance proves recovery from the stale iPhone/empty-gateway bond asymmetry without using
+**Forget This Device**. It does not prove the vehicle OBD-II protocol. The contemporaneous health
+report contained zero received vehicle-bus frames, zero dropped frames, zero bus errors, and zero
+bus-off events; protocol discovery therefore remains a separate open gate.
