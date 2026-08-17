@@ -6,21 +6,30 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "vhos_can.h"
+#include "vhos_capture_store.h"
 
 #define VHOS_HEADER_BYTES 36U
 #define VHOS_MAX_PAYLOAD_BYTES 1024U
 #define VHOS_MAX_FRAME_BYTES (VHOS_HEADER_BYTES + VHOS_MAX_PAYLOAD_BYTES)
 #define VHOS_MESSAGE_HANDSHAKE 1U
+#define VHOS_MESSAGE_RAW_CAN_FRAME 2U
 #define VHOS_MESSAGE_GATEWAY_HEALTH 4U
+#define VHOS_MESSAGE_CAPTURE_LOG_REQUEST 11U
+#define VHOS_MESSAGE_CAPTURE_LOG_INDEX 12U
+#define VHOS_MESSAGE_CAPTURE_LOG_CHUNK 13U
+#define VHOS_CAPTURE_LOG_REQUEST_BYTES 8U
+#define VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES 16U
+#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 24U
+#define VHOS_LIVE_CAN_INTERVAL_US 500000ULL
 
 #ifndef VHOS_BUILD_ID
 #define VHOS_BUILD_ID "source-tree"
 #endif
 
 #ifdef CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART
-#define VHOS_CAPABILITIES "[\"capture.passive\",\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
+#define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
 #else
-#define VHOS_CAPABILITIES "[\"capture.passive\",\"ota.ab\",\"ota.rollback-self-test\"]"
+#define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\"]"
 #endif
 
 static uint8_t rx_buffer[VHOS_MAX_FRAME_BYTES];
@@ -29,6 +38,9 @@ static uint64_t tx_sequence = 1;
 static char gateway_id_value[40] = "esp32-uninitialized";
 static vhos_transport_emit_fn emit_frame;
 static SemaphoreHandle_t send_lock;
+static bool can_observer_registered;
+static portMUX_TYPE live_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint64_t last_live_can_us;
 
 static uint32_t read_u32_le(const uint8_t *bytes)
 {
@@ -44,6 +56,12 @@ static void write_u32_le(uint8_t *bytes, uint32_t value)
     bytes[1] = (uint8_t)(value >> 8);
     bytes[2] = (uint8_t)(value >> 16);
     bytes[3] = (uint8_t)(value >> 24);
+}
+
+static void write_u16_le(uint8_t *bytes, uint16_t value)
+{
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8);
 }
 
 static void write_u64_le(uint8_t *bytes, uint64_t value)
@@ -65,13 +83,16 @@ static uint32_t crc32c(const uint8_t *bytes, size_t length)
     return ~crc;
 }
 
-static esp_err_t send_payload(uint8_t message_type, const char *payload, bool health_channel)
+static esp_err_t send_payload(
+    uint8_t message_type,
+    const uint8_t *payload,
+    size_t payload_length,
+    bool health_channel
+)
 {
-    if (emit_frame == NULL || payload == NULL || send_lock == NULL) {
+    if (emit_frame == NULL || (payload == NULL && payload_length > 0) || send_lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-
-    size_t payload_length = strlen(payload);
     if (payload_length > VHOS_MAX_PAYLOAD_BYTES) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -89,10 +110,25 @@ static esp_err_t send_payload(uint8_t message_type, const char *payload, bool he
     write_u64_le(&frame[20], (uint64_t)esp_timer_get_time());
     write_u32_le(&frame[28], crc32c((const uint8_t *)payload, payload_length));
     write_u32_le(&frame[32], crc32c(frame, 32));
-    memcpy(&frame[VHOS_HEADER_BYTES], payload, payload_length);
+    if (payload_length > 0) {
+        memcpy(&frame[VHOS_HEADER_BYTES], payload, payload_length);
+    }
     esp_err_t result = emit_frame(frame, VHOS_HEADER_BYTES + payload_length, health_channel);
     xSemaphoreGive(send_lock);
     return result;
+}
+
+static esp_err_t send_json(uint8_t message_type, const char *payload, bool health_channel)
+{
+    if (payload == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return send_payload(
+        message_type,
+        (const uint8_t *)payload,
+        strlen(payload),
+        health_channel
+    );
 }
 
 static esp_err_t send_handshake(void)
@@ -102,13 +138,13 @@ static esp_err_t send_handshake(void)
         payload,
         sizeof(payload),
         "{\"active_config_id\":\"mrdiy-v13-passive-can-scan\","
-        "\"active_config_version\":\"0.2.0\","
+        "\"active_config_version\":\"0.3.0\","
         "\"bootloader_version\":\"esp-idf-5.5.3\","
         "\"capabilities\":%s,"
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.10\","
+        "\"firmware_version\":\"0.1.0-dev.11\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -122,7 +158,7 @@ static esp_err_t send_handshake(void)
     if (length < 0 || (size_t)length >= sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_payload(VHOS_MESSAGE_HANDSHAKE, payload, false);
+    return send_json(VHOS_MESSAGE_HANDSHAKE, payload, false);
 }
 
 esp_err_t vhos_transport_send_health(void)
@@ -131,6 +167,8 @@ esp_err_t vhos_transport_send_health(void)
     esp_err_t can_result = vhos_can_get_health(&health);
     uint64_t observed_us = (uint64_t)esp_timer_get_time();
     const char *candidate = vhos_can_passive_candidate(&health);
+    vhos_capture_store_status_t capture = {0};
+    bool capture_available = vhos_capture_store_get_status(&capture) == ESP_OK;
     char candidate_json[32];
     if (candidate == NULL) {
         strlcpy(candidate_json, "null", sizeof(candidate_json));
@@ -153,7 +191,11 @@ esp_err_t vhos_transport_send_health(void)
         "\"can_scan_cycles\":%lu,"
         "\"can_scan_state\":\"%s\","
         "\"can_standard_frames\":%llu,"
-        "\"capture_active\":false,"
+        "\"capture_active\":%s,"
+        "\"capture_queue_dropped_records\":%llu,"
+        "\"capture_retained_records\":%llu,"
+        "\"capture_session_id\":%lu,"
+        "\"capture_storage_write_failures\":%llu,"
         "\"contract\":\"gateway.health\","
         "\"contract_version\":\"1.0.0\","
         "\"dropped_frames\":%llu,"
@@ -161,7 +203,7 @@ esp_err_t vhos_transport_send_health(void)
         "\"observed_at\":\"monotonic_us:%llu\","
         "\"passive_can_candidate\":%s,"
         "\"received_frames\":%llu,"
-        "\"storage_free_bytes\":null,"
+        "\"storage_free_bytes\":%lu,"
         "\"supply_millivolts\":null,"
         "\"vehicle_motion\":\"UNKNOWN\"}",
         (unsigned long long)health.bus_error_count,
@@ -175,15 +217,139 @@ esp_err_t vhos_transport_send_health(void)
         (unsigned long)health.scan_cycles,
         vhos_can_scan_state_name(health.scan_state),
         (unsigned long long)health.standard_frames,
+        capture_available && capture.logging ? "true" : "false",
+        (unsigned long long)capture.queue_dropped_records,
+        (unsigned long long)capture.retained_records,
+        (unsigned long)capture.current_session_id,
+        (unsigned long long)capture.storage_write_failures,
         (unsigned long long)health.dropped_frames,
         (unsigned long long)observed_us,
         candidate_json,
-        (unsigned long long)health.received_frames
+        (unsigned long long)health.received_frames,
+        (unsigned long)capture.free_bytes
     );
     if (length < 0 || (size_t)length >= sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_payload(VHOS_MESSAGE_GATEWAY_HEALTH, payload, true);
+    return send_json(VHOS_MESSAGE_GATEWAY_HEALTH, payload, true);
+}
+
+static esp_err_t send_capture_log_index(void)
+{
+    vhos_capture_store_status_t status = {0};
+    esp_err_t result = vhos_capture_store_get_status(&status);
+    char payload[VHOS_MAX_PAYLOAD_BYTES + 1];
+    int length = snprintf(
+        payload,
+        sizeof(payload),
+        "{\"contract\":\"gateway.capture-log-index\","
+        "\"contract_version\":\"1.0.0\","
+        "\"current_bytes\":%lu,\"current_records\":%lu,\"current_session_id\":%lu,"
+        "\"free_bytes\":%lu,\"logging\":%s,\"mounted\":%s,"
+        "\"observed_frames\":%llu,\"previous_bytes\":%lu,"
+        "\"previous_records\":%lu,\"previous_session_id\":%lu,"
+        "\"queue_dropped_records\":%llu,\"record_bytes\":%u,"
+        "\"retained_records\":%llu,\"sample_suppressed_frames\":%llu,"
+        "\"sampled_frames\":%llu,\"storage_write_failures\":%llu,"
+        "\"total_bytes\":%lu}",
+        (unsigned long)status.current_bytes,
+        (unsigned long)status.current_records,
+        (unsigned long)status.current_session_id,
+        (unsigned long)status.free_bytes,
+        status.logging ? "true" : "false",
+        status.mounted ? "true" : "false",
+        (unsigned long long)status.observed_frames,
+        (unsigned long)status.previous_bytes,
+        (unsigned long)status.previous_records,
+        (unsigned long)status.previous_session_id,
+        (unsigned long long)status.queue_dropped_records,
+        VHOS_CAPTURE_RECORD_BYTES,
+        (unsigned long long)status.retained_records,
+        (unsigned long long)status.sample_suppressed_frames,
+        (unsigned long long)status.sampled_frames,
+        (unsigned long long)status.storage_write_failures,
+        (unsigned long)status.total_bytes
+    );
+    if (result != ESP_OK || length < 0 || (size_t)length >= sizeof(payload)) {
+        return result == ESP_OK ? ESP_ERR_INVALID_SIZE : result;
+    }
+    return send_json(VHOS_MESSAGE_CAPTURE_LOG_INDEX, payload, false);
+}
+
+static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
+{
+    uint8_t payload[VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES +
+                    VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY * VHOS_CAPTURE_RECORD_BYTES] = {0};
+    size_t data_length = 0;
+    uint32_t record_count = 0;
+    bool end = false;
+    esp_err_t result = vhos_capture_store_read_records(
+        slot,
+        offset,
+        &payload[VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES],
+        sizeof(payload) - VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES,
+        &data_length,
+        &record_count,
+        &end
+    );
+    if (result == ESP_ERR_NOT_FOUND) {
+        result = ESP_OK;
+        end = true;
+    }
+    if (result != ESP_OK) {
+        return result;
+    }
+    vhos_capture_store_status_t status = {0};
+    vhos_capture_store_get_status(&status);
+    payload[0] = 1;
+    payload[1] = slot;
+    payload[2] = end ? 1 : 0;
+    write_u32_le(&payload[4], offset);
+    write_u16_le(&payload[8], (uint16_t)record_count);
+    write_u16_le(&payload[10], VHOS_CAPTURE_RECORD_BYTES);
+    write_u32_le(
+        &payload[12],
+        slot == VHOS_CAPTURE_SLOT_CURRENT
+            ? status.current_session_id
+            : status.previous_session_id
+    );
+    return send_payload(
+        VHOS_MESSAGE_CAPTURE_LOG_CHUNK,
+        payload,
+        VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES + data_length,
+        false
+    );
+}
+
+static void send_live_can_observation(
+    const vhos_can_observation_t *observation,
+    void *context
+)
+{
+    (void)context;
+    bool eligible = false;
+    portENTER_CRITICAL(&live_lock);
+    if (observation->monotonic_us - last_live_can_us >= VHOS_LIVE_CAN_INTERVAL_US) {
+        last_live_can_us = observation->monotonic_us;
+        eligible = true;
+    }
+    portEXIT_CRITICAL(&live_lock);
+    if (!eligible) {
+        return;
+    }
+    uint8_t payload[36] = {0};
+    payload[0] = 1;
+    payload[1] = (observation->extended ? 0x01 : 0) |
+                 (observation->remote_request ? 0x02 : 0) |
+                 (observation->listen_only ? 0x04 : 0);
+    payload[2] = observation->data_length;
+    payload[3] = observation->bitrate_bps == 250000U ? 2 : 1;
+    write_u32_le(&payload[4], observation->identifier);
+    write_u64_le(&payload[8], observation->source_sequence);
+    write_u64_le(&payload[16], observation->monotonic_us);
+    write_u32_le(&payload[24], vhos_capture_store_current_session_id());
+    memcpy(&payload[28], observation->data, 8);
+    send_payload(VHOS_MESSAGE_RAW_CAN_FRAME, payload, sizeof(payload), false);
 }
 
 static esp_err_t process_frame(const uint8_t *frame, size_t length)
@@ -205,6 +371,30 @@ static esp_err_t process_frame(const uint8_t *frame, size_t length)
         return result == ESP_OK ? vhos_transport_send_health() : result;
     }
 
+    if (frame[6] == VHOS_MESSAGE_CAPTURE_LOG_REQUEST &&
+        payload_length == VHOS_CAPTURE_LOG_REQUEST_BYTES) {
+        const uint8_t *payload = &frame[VHOS_HEADER_BYTES];
+        if (payload[0] != 1) {
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        uint8_t operation = payload[1];
+        if (operation == 0) {
+            return send_capture_log_index();
+        }
+        if (operation == 1) {
+            return send_capture_log_chunk(payload[2], read_u32_le(&payload[4]));
+        }
+        if (operation == 2) {
+            esp_err_t result = vhos_capture_store_rotate();
+            return result == ESP_OK ? send_capture_log_index() : result;
+        }
+        if (operation == 3 || operation == 4) {
+            esp_err_t result = vhos_capture_store_set_logging(operation == 4);
+            return result == ESP_OK ? send_capture_log_index() : result;
+        }
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     /* Default deny: this target has no raw-CAN or arbitrary diagnostic transmit command. */
     return ESP_ERR_NOT_SUPPORTED;
 }
@@ -217,6 +407,10 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
     emit_frame = emit;
     if (send_lock == NULL) {
         send_lock = xSemaphoreCreateMutex();
+    }
+    if (!can_observer_registered &&
+        vhos_can_register_observer(send_live_can_observation, NULL) == ESP_OK) {
+        can_observer_registered = true;
     }
     vhos_transport_reset();
 }

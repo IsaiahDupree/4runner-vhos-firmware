@@ -21,8 +21,8 @@ themselves, prove a vehicle protocol.
 
 The image exposes the VHOS BLE service used by the iOS app and reports actual
 gateway health: received frames, controller drops, bus errors, bus-off transitions,
-and the enforced listen-only state. Supply voltage, motion, capture storage, protocol
-confirmation, active OBD queries, and Wi-Fi OTA upload remain unavailable until their real
+the enforced listen-only state, and the passive capture-store status. Supply voltage, motion,
+protocol confirmation, active OBD queries, and Wi-Fi OTA upload remain unavailable until their real
 implementations land; the app therefore shows those states as unavailable or pending.
 
 Firmware `v0.1.0-dev.10` alternates bounded 10-second listen-only windows at 500 and 250 kbit/s
@@ -31,6 +31,13 @@ probe state, standard/extended frame counts, per-bitrate counts, and a passive C
 passive lock proves only that valid CAN traffic was observed; `obd_protocol_confirmed` remains
 false until a separately authorized diagnostic read succeeds. See
 [passive CAN discovery](docs/PASSIVE-CAN-DISCOVERY.md).
+
+Firmware `v0.1.0-dev.11` adds an always-on, bounded passive flight recorder in the dedicated
+SPIFFS partition. It retains current and previous rolling segments, CRC-protects every record,
+samples changing identifiers at up to 5 Hz and stable identifiers at 1 Hz, and reports every
+suppressed, queued, retained, dropped, and failed-write count. An encrypted BLE client can resume
+chunked downloads without enabling Wi-Fi. See
+[passive CAN flight recorder](docs/PASSIVE-CAN-FLIGHT-RECORDER.md).
 
 The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rollback
 enabled. This is recovery groundwork, not a claim that a Wi-Fi OTA upload endpoint is
@@ -73,6 +80,7 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 - [`docs/SOFTAP-STATUS-SECURITY.md`](docs/SOFTAP-STATUS-SECURITY.md) — threat model and authority matrix
 - [`docs/SOFTAP-STATUS-OPERATIONS.md`](docs/SOFTAP-STATUS-OPERATIONS.md) — commissioning and acceptance procedure
 - [`docs/PASSIVE-CAN-DISCOVERY.md`](docs/PASSIVE-CAN-DISCOVERY.md) — safe bitrate probe, evidence, and limits
+- [`docs/PASSIVE-CAN-FLIGHT-RECORDER.md`](docs/PASSIVE-CAN-FLIGHT-RECORDER.md) — persistent capture, BLE sync, record format, and low-trip workflow
 
 ## BLE commissioning
 

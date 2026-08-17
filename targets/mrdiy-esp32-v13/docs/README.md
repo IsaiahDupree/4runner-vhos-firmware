@@ -15,6 +15,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [SoftAP operations and verification](SOFTAP-STATUS-OPERATIONS.md) | Connection procedure, physical test plan, failure diagnosis, acceptance evidence, and recovery. |
 | [BLE bond-loss recovery](BLE-BOND-LOSS-RECOVERY.md) | Persistent identity epochs, automatic recovery after NVS loss, failure behavior, and acceptance tests. |
 | [Passive CAN discovery](PASSIVE-CAN-DISCOVERY.md) | Bounded 500/250-kbit listen-only probing, lock evidence, safety boundaries, and vehicle acceptance. |
+| [Passive CAN flight recorder](PASSIVE-CAN-FLIGHT-RECORDER.md) | Offline capture, sampling, flash retention, record framing, resumable BLE transfer, iPhone storage, export, and field workflow. |
 
 ## Governing rule
 
@@ -48,3 +49,7 @@ connect, encryption-failure, disconnect loop.
 `v0.1.0-dev.10` adds a continuously bounded passive 500/250-kbit CAN probe. It can establish a
 vehicle-bus candidate but cannot confirm OBD-II, issue diagnostic requests, or transmit a CAN
 frame.
+
+`v0.1.0-dev.11` adds a CRC-protected passive flight recorder and resumable encrypted-BLE log
+transfer. The recorder is autonomous of the phone and its commands affect only local evidence
+retention; the firmware still compiles no vehicle-bus transmit command.

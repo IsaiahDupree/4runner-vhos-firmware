@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include "vhos_ble.h"
 #include "vhos_can.h"
+#include "vhos_capture_store.h"
 #include "vhos_status_web.h"
 #include "vhos_transport.h"
 
@@ -52,6 +53,10 @@ void app_main(void)
         mac[3], mac[4], mac[5]
     );
 
+    esp_err_t capture_result = vhos_capture_store_start();
+    if (capture_result != ESP_OK) {
+        ESP_LOGE(TAG, "CAPTURE_STORE_SELF_TEST_FAIL reason=%s", esp_err_to_name(capture_result));
+    }
     ESP_ERROR_CHECK(vhos_can_start());
     ESP_ERROR_CHECK(vhos_ble_start(device_name, gateway_id));
 

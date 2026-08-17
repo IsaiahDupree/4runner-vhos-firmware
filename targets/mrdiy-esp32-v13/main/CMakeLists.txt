@@ -15,6 +15,7 @@ idf_component_register(
         "main.c"
         "vhos_ble.c"
         "vhos_can.c"
+        "vhos_capture_store.c"
         "vhos_status_web.c"
         "vhos_transport.c"
     INCLUDE_DIRS "."

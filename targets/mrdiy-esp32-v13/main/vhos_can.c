@@ -4,6 +4,7 @@
 #include "driver/gpio.h"
 #include "driver/twai.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -15,6 +16,12 @@
 #define VHOS_CAN_PROBE_WINDOW_MS 10000U
 #define VHOS_CAN_LOCK_MINIMUM_FRAMES 3U
 #define VHOS_CAN_RECEIVE_POLL_MS 250U
+#define VHOS_CAN_MAX_OBSERVERS 3U
+
+typedef struct {
+    vhos_can_observer_fn function;
+    void *context;
+} vhos_can_observer_t;
 
 static const char *TAG = "vhos_can";
 static portMUX_TYPE metrics_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -35,6 +42,34 @@ static uint32_t current_bitrate_bps = VHOS_CAN_BITRATE_500K_BPS;
 static uint32_t scan_cycles;
 static vhos_can_scan_state_t scan_state = VHOS_CAN_SCAN_PROBING_500K;
 static SemaphoreHandle_t controller_lock;
+static portMUX_TYPE observer_lock = portMUX_INITIALIZER_UNLOCKED;
+static vhos_can_observer_t observers[VHOS_CAN_MAX_OBSERVERS];
+static uint64_t source_sequence;
+
+static void publish_observation(const twai_message_t *message, uint32_t bitrate_bps)
+{
+    vhos_can_observation_t observation = {
+        .source_sequence = ++source_sequence,
+        .monotonic_us = (uint64_t)esp_timer_get_time(),
+        .identifier = message->identifier,
+        .bitrate_bps = bitrate_bps,
+        .data_length = message->data_length_code > 8 ? 8 : message->data_length_code,
+        .extended = message->extd,
+        .remote_request = message->rtr,
+        .listen_only = true,
+    };
+    memcpy(observation.data, message->data, observation.data_length);
+
+    vhos_can_observer_t snapshot[VHOS_CAN_MAX_OBSERVERS];
+    portENTER_CRITICAL(&observer_lock);
+    memcpy(snapshot, observers, sizeof(snapshot));
+    portEXIT_CRITICAL(&observer_lock);
+    for (size_t index = 0; index < VHOS_CAN_MAX_OBSERVERS; index++) {
+        if (snapshot[index].function != NULL) {
+            snapshot[index].function(&observation, snapshot[index].context);
+        }
+    }
+}
 
 static twai_timing_config_t timing_for_bitrate(uint32_t bitrate_bps)
 {
@@ -182,6 +217,7 @@ static void receive_task(void *argument)
     TickType_t phase_started = xTaskGetTickCount();
     while (true) {
         if (twai_receive(&message, pdMS_TO_TICKS(VHOS_CAN_RECEIVE_POLL_MS)) == ESP_OK) {
+            uint32_t observation_bitrate;
             portENTER_CRITICAL(&metrics_lock);
             received_frames++;
             if (message.extd) {
@@ -194,7 +230,9 @@ static void receive_task(void *argument)
             } else {
                 frames_250k++;
             }
+            observation_bitrate = current_bitrate_bps;
             portEXIT_CRITICAL(&metrics_lock);
+            publish_observation(&message, observation_bitrate);
         }
 
         uint64_t total_frames;
@@ -254,6 +292,29 @@ static void receive_task(void *argument)
         portEXIT_CRITICAL(&metrics_lock);
         phase_started = xTaskGetTickCount();
     }
+}
+
+esp_err_t vhos_can_register_observer(vhos_can_observer_fn observer, void *context)
+{
+    if (observer == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t result = ESP_ERR_NO_MEM;
+    portENTER_CRITICAL(&observer_lock);
+    for (size_t index = 0; index < VHOS_CAN_MAX_OBSERVERS; index++) {
+        if (observers[index].function == observer && observers[index].context == context) {
+            result = ESP_OK;
+            break;
+        }
+        if (observers[index].function == NULL) {
+            observers[index].function = observer;
+            observers[index].context = context;
+            result = ESP_OK;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&observer_lock);
+    return result;
 }
 
 esp_err_t vhos_can_start(void)
