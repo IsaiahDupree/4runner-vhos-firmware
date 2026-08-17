@@ -86,6 +86,7 @@ authenticated local channel.
 
 | Control | Effect |
 | --- | --- |
+| Default-off release policy | Avoids an unsolicited WLAN, remembered-client auto-join, and idle coexistence/power cost. |
 | Boot-bounded 900-second window | Removes the WLAN and server after commissioning time. |
 | One station maximum | Limits concurrent observers and radio contention. |
 | RAM-only Wi-Fi driver storage | Avoids a second implicit Wi-Fi credential store. |
@@ -119,11 +120,15 @@ authenticated local channel.
 - UART reveals the development credential to someone with physical access.
 - WPA2 and BLE coexistence can affect radio timing and requires endurance validation.
 - The browser channel does not have application-layer encryption.
-- The boot window appears after every power cycle; production should require explicit physical or
-  owner-authorized enablement.
+- The development Kconfig switch can still cause a window after every power cycle; it must remain
+  disabled in releases while encrypted owner-authorized activation is implemented.
 - Credential rotation has no owner UI in this milestone.
 - Denial of service by radio interference remains possible.
 - Runtime counters can reveal that a vehicle is active, so the page must never be exposed through
   station mode, port forwarding, or a public tunnel.
 
 These risks are documented constraints, not hidden implementation gaps.
+
+Passive Mac-presence detection is explicitly rejected as an activation control because missed or
+spoofed discovery would cause the service to fail open. See
+[the activation policy](SOFTAP-ACTIVATION-POLICY.md).

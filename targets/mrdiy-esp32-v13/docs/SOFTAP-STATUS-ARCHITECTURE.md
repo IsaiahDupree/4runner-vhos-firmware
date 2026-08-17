@@ -1,6 +1,6 @@
 # Authenticated SoftAP status architecture
 
-Status: development implementation for `v0.1.0-dev.6`
+Status: implemented but default-disabled for `v0.1.0-dev.7`
 
 ## 1. Problem
 
@@ -22,7 +22,7 @@ commissioning channel without adding cloud infrastructure.
 
 | ID | Requirement | Why |
 | --- | --- | --- |
-| SAP-001 | Start a WPA2-protected SoftAP for 15 minutes after boot. | Provides a predictable commissioning window while limiting continuous radio exposure. |
+| SAP-001 | Keep the SoftAP off by default; after explicit activation, start it for at most 15 minutes. | Prevents unexpected client auto-join, power, and coexistence impact while preserving bounded commissioning. |
 | SAP-002 | Generate a unique per-device random credential and persist it in NVS. | Avoids a shared fleet password and survives application-only updates. |
 | SAP-003 | Require HTTP Basic authentication on every registered route. | A station that joins the WLAN must still authenticate to the application surface. |
 | SAP-004 | Register only read-only `GET` routes. | Makes the absence of mutation structural rather than dependent on UI discipline. |
@@ -111,27 +111,29 @@ It owns no CAN or BLE behavior.
 
 ### `main`
 
-Constructs the stable gateway identity, starts CAN and BLE, waits for BLE readiness, starts the
-SoftAP status service, and records whether the optional observation surface became ready.
+Constructs the stable gateway identity, starts CAN and BLE, waits for BLE readiness, and leaves
+the SoftAP disabled unless the development-only Kconfig activation policy is explicitly enabled.
+It records the resulting state in boot evidence.
 
 Why: startup ordering stays visible in one place. CAN and BLE remain the primary safety-critical
 path if the status service cannot start.
 
-## 6. Boot and expiration sequence
+## 6. Normal boot and activated-service sequence
 
 1. Initialize the existing NVS partition.
 2. Derive the gateway ID and display names from the hardware MAC.
 3. Start TWAI in listen-only mode.
 4. Start NimBLE and wait for its ready semaphore.
-5. Open the `vhos_status` NVS namespace.
-6. Load the existing status credential or generate and commit a new random credential.
-7. Initialize ESP-NETIF and the default event loop.
-8. Create the default SoftAP interface.
-9. Configure WPA2-PSK, protected management frames, one station maximum, and RAM-only Wi-Fi
+5. On a normal release boot, log `VHOS_SOFTAP_DISABLED` and do not initialize Wi-Fi or HTTP.
+6. Only after an explicit development activation, open the `vhos_status` NVS namespace.
+7. Load the existing status credential or generate and commit a new random credential.
+8. Initialize ESP-NETIF and the default event loop.
+9. Create the default SoftAP interface.
+10. Configure WPA2-PSK, protected management frames, one station maximum, and RAM-only Wi-Fi
    driver storage.
-10. Start the HTTP server and register only authenticated `GET` handlers.
-11. Record the monotonic expiration deadline and start a lifecycle task.
-12. At 15 minutes, stop HTTP first, then stop Wi-Fi. CAN and BLE continue.
+11. Start the HTTP server and register only authenticated `GET` handlers.
+12. Record the monotonic expiration deadline and start a lifecycle task.
+13. At 15 minutes, stop HTTP first, then stop Wi-Fi. CAN and BLE continue.
 
 The ordering deliberately brings the primary vehicle observer online before the secondary browser
 surface. Expiration stops incoming requests before removing the network interface.
@@ -169,8 +171,8 @@ DNS requirements, and supply-chain dependencies. The browser polls every two sec
 existing BLE health cadence and avoiding unnecessary radio activity.
 
 Only one Wi-Fi station is allowed. BLE and Wi-Fi share the ESP32 2.4 GHz radio, so the page is a
-commissioning tool rather than an always-on dashboard. The 15-minute deadline bounds coexistence
-impact and power use.
+commissioning tool rather than an always-on dashboard. Default-off activation prevents idle radio
+impact; the 15-minute deadline bounds coexistence impact and power use after activation.
 
 ## 10. Failure behavior
 
@@ -190,3 +192,6 @@ Before production, choose an owner enrollment and recovery design that does not 
 Candidates include a physical-presence button, QR label, secure BLE provisioning with authenticated
 identity, or a manufacturing-injected credential. HTTPS or an app-pinned local protocol must be
 evaluated before treating the browser channel as suitable for sensitive data.
+
+Mac proximity is not a deferred activation candidate: missing passive advertisements cannot prove
+that a specific Mac is absent. See [the activation policy](SOFTAP-ACTIVATION-POLICY.md).

@@ -9,6 +9,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | Document | Purpose |
 | --- | --- |
 | [SoftAP status architecture](SOFTAP-STATUS-ARCHITECTURE.md) | Scope, requirements, lifecycle, components, data flow, and design decisions. |
+| [SoftAP activation policy](SOFTAP-ACTIVATION-POLICY.md) | Why Wi-Fi is off by default, the Mac association incident, rejected proximity detection, and the explicit-activation state machine. |
 | [SoftAP status API](SOFTAP-STATUS-API.md) | Browser routes, JSON contract, field lineage, nullability, caching, and compatibility policy. |
 | [SoftAP security](SOFTAP-STATUS-SECURITY.md) | Threat model, authentication, credential lifecycle, attack-surface controls, and residual risks. |
 | [SoftAP operations and verification](SOFTAP-STATUS-OPERATIONS.md) | Connection procedure, physical test plan, failure diagnosis, acceptance evidence, and recovery. |
@@ -30,7 +31,9 @@ Zero is never substituted for an unknown measurement.
 
 ## Version scope
 
-The authenticated status service is introduced for the `v0.1.0-dev.6` milestone. It remains a
-development and commissioning surface, not a production remote-management interface. Later
-versions may change the enrollment flow or add transport security, but they must retain the
-read-only and no-arbitrary-transmit boundaries.
+The authenticated status service implementation was introduced in the unreleased
+`v0.1.0-dev.6` bench image. `v0.1.0-dev.7` changes the normal policy to **off by default** after
+the Mac association test demonstrated that an automatically remembered no-internet AP is too
+disruptive. The service remains a development and commissioning surface, not a production remote-
+management interface. Later versions may add explicit encrypted-BLE activation or stronger
+transport security, but they must retain the read-only and no-arbitrary-transmit boundaries.

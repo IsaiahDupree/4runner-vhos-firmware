@@ -4,8 +4,9 @@ Contract version: `vhos.status/1.0.0`
 
 ## 1. Transport contract
 
-The HTTP service listens only on the ESP32 SoftAP interface during its boot-bounded availability
-window. All registered routes require HTTP Basic authentication.
+The HTTP service is off during a normal boot. After an explicit commissioning activation, it
+listens only on the ESP32 SoftAP interface during its bounded availability window. All registered
+routes require HTTP Basic authentication.
 
 | Method | Path | Response | Purpose |
 | --- | --- | --- | --- |

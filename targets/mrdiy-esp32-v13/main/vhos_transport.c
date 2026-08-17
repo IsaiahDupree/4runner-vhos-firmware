@@ -17,6 +17,12 @@
 #define VHOS_BUILD_ID "source-tree"
 #endif
 
+#ifdef CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART
+#define VHOS_CAPABILITIES "[\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
+#else
+#define VHOS_CAPABILITIES "[\"ota.ab\",\"ota.rollback-self-test\"]"
+#endif
+
 static uint8_t rx_buffer[VHOS_MAX_FRAME_BYTES];
 static size_t rx_length;
 static uint64_t tx_sequence = 1;
@@ -98,17 +104,18 @@ static esp_err_t send_handshake(void)
         "{\"active_config_id\":\"mrdiy-v13-passive-500k\","
         "\"active_config_version\":\"0.1.0\","
         "\"bootloader_version\":\"esp-idf-5.5.3\","
-        "\"capabilities\":[\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"],"
+        "\"capabilities\":%s,"
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.6\","
+        "\"firmware_version\":\"0.1.0-dev.7\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
         "\"ota_maximum_image_bytes\":null,"
         "\"ota_upload_url\":null,"
         "\"protocol_version\":\"1.0.0\"}",
+        VHOS_CAPABILITIES,
         VHOS_BUILD_ID,
         gateway_id_value
     );

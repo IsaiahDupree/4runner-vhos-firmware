@@ -2,10 +2,18 @@
 
 ## 1. Operator workflow
 
+### Confirm the activation policy
+
+The release default is disabled. A normal boot must log `VHOS_SOFTAP_DISABLED` and advertise no
+`VHOS-STATUS-*` network. Until the encrypted iPhone activation command is implemented, only a
+deliberate development build with `CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART=y` may start the service.
+Do not enable that option on an unattended or vehicle-installed gateway.
+
 ### Boot and retrieve the development credential
 
-Connect a trusted USB serial console at 115200 baud and reset the gateway. Firmware logs one line
-containing the local SSID, fixed username, generated password, address, and expiration window.
+With the development activation option enabled, connect a trusted USB serial console at 115200
+baud and reset the gateway. Firmware logs one line containing the local SSID, fixed username,
+generated password, address, and expiration window.
 
 Treat the password as a device credential. Do not paste it into tickets, screenshots, commit
 messages, test fixtures, or public logs.
@@ -19,7 +27,8 @@ messages, test fixtures, or public logs.
 5. Watch the remaining-window indicator; the network intentionally disappears at expiration.
 
 The phone or Mac may report that this Wi-Fi network has no internet. That is expected and is part
-of the isolation design.
+of the isolation design. On macOS, remove `VHOS-STATUS-*` from preferred networks immediately
+after testing so it cannot replace the normal Wi-Fi association later.
 
 ## 2. Command-line verification
 
@@ -51,6 +60,7 @@ Expected results:
 
 | Test | Required evidence |
 | --- | --- |
+| Default-off boot | Release configuration emits no VHOS SSID and logs explicit activation required. |
 | Fresh NVS credential | A non-default credential is generated, committed, and the service starts. |
 | Persisted credential | Application-only reflash preserves the same NVS credential and BLE bond. |
 | Unauthorized request | Every registered route returns `401` without a status body. |
@@ -63,7 +73,7 @@ Expected results:
 | Counter lineage | CAN counters on HTTP match the same firmware snapshot source used by BLE health. |
 | OTA observation | Running, boot, next, and rollback fields match ESP-IDF partition APIs. |
 | Expiration | HTTP stops, the SSID disappears, and BLE/CAN continue after 900 seconds. |
-| Reboot window | A new boot creates a new 900-second window without changing the persisted password. |
+| Activated reboot window | A development-enabled boot creates a 900-second window without changing the persisted password. |
 
 ## 4. Status interpretation
 
@@ -97,9 +107,10 @@ millivolts would be a false measurement.
 
 ### SSID does not appear
 
-Check UART for `VHOS_SOFTAP_READY` or `VHOS_SOFTAP_START_FAILED`. Confirm the boot is within the
-15-minute window. A credential storage, ESP-NETIF, Wi-Fi, or HTTP startup failure must leave BLE and
-CAN running and report the original ESP-IDF error.
+First check for `VHOS_SOFTAP_DISABLED`; that is the expected release behavior. On an intentional
+development-enabled build, check UART for `VHOS_SOFTAP_READY` or `VHOS_SOFTAP_START_FAILED` and
+confirm the boot is within the 15-minute window. A credential storage, ESP-NETIF, Wi-Fi, or HTTP
+startup failure must leave BLE and CAN running and report the original ESP-IDF error.
 
 ### Browser continually asks for credentials
 
@@ -125,6 +136,7 @@ For every release containing this service, retain:
 - firmware commit and build ID;
 - merged and OTA application SHA-256 hashes;
 - target, partition, rollback, image-size, and no-transmit validation results;
+- proof that status SoftAP autostart is disabled in release configuration;
 - the automated status-surface authority check: exactly three `GET` routes, WPA2, PMF,
   one station, NVS credential persistence, Basic authentication, constant-time comparison,
   no mutation verbs or restart/erase/OTA-write/CAN-transmit calls, and no external page assets;

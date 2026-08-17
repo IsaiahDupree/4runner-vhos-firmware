@@ -31,19 +31,28 @@ already implemented.
 
 ## Wi-Fi access-point status
 
-Firmware `v0.1.0-dev.6` adds an authenticated, read-only commissioning surface at
-`http://192.168.4.1/`. During the first 15 minutes after boot, the gateway advertises a
-WPA2 SoftAP named `VHOS-STATUS-<chip-suffix>`. The HTTP server accepts only authenticated
-`GET` requests for the page, its versioned JSON evidence, and a health check. The per-device
-random password is created once, persisted in NVS, and printed only on the physical UART
-commissioning console.
+Firmware `v0.1.0-dev.7` contains an authenticated, read-only commissioning surface but keeps it
+**off by default**. A normal boot initializes neither Wi-Fi nor HTTP. The earlier unreleased
+`v0.1.0-dev.6` bench behavior started an AP automatically; that policy was withdrawn after a Mac
+joined the no-internet AP and left its normal network.
+
+When deliberately enabled in a development build, the gateway advertises a WPA2 SoftAP named
+`VHOS-STATUS-<chip-suffix>` for at most 15 minutes and serves `http://192.168.4.1/`. The HTTP
+server accepts only authenticated `GET` requests for the page, its versioned JSON evidence, and a
+health check. The per-device random password is created once, persisted in NVS, and printed only
+on the physical UART commissioning console.
 
 The page resolves its values from the same live BLE and TWAI/CAN state used by the gateway
 transport. It reports firmware identity, uptime, reset reason, BLE link state, enforced
 listen-only state, CAN counters, storage/power availability, and A/B OTA/rollback state.
 It does not include configuration, reboot, erase, upload, diagnostic-command, or CAN-transmit
-routes. When the 15-minute boot window ends, the HTTP server and Wi-Fi radio stop while BLE
+routes. When the 15-minute activated window ends, the HTTP server and Wi-Fi radio stop while BLE
 and passive CAN observation continue.
+
+Mac-presence detection is intentionally not used: Apple private addresses, sleep, missed radio
+observations, or interference would make “not detected” an unsafe fail-open signal. The planned
+production activation is an explicit user action over an already bonded and encrypted iPhone BLE
+session.
 
 The internet-hosted VHOS gateway provisioner remains a separate desktop USB flasher; it is
 not served by the ESP32.
@@ -52,6 +61,7 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 
 - [`docs/README.md`](docs/README.md) — documentation map and governing rules
 - [`docs/SOFTAP-STATUS-ARCHITECTURE.md`](docs/SOFTAP-STATUS-ARCHITECTURE.md) — system boundaries and data lineage
+- [`docs/SOFTAP-ACTIVATION-POLICY.md`](docs/SOFTAP-ACTIVATION-POLICY.md) — default-off policy, Mac isolation, and activation rationale
 - [`docs/SOFTAP-STATUS-API.md`](docs/SOFTAP-STATUS-API.md) — route and field contract
 - [`docs/SOFTAP-STATUS-SECURITY.md`](docs/SOFTAP-STATUS-SECURITY.md) — threat model and authority matrix
 - [`docs/SOFTAP-STATUS-OPERATIONS.md`](docs/SOFTAP-STATUS-OPERATIONS.md) — commissioning and acceptance procedure

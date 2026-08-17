@@ -1,0 +1,12 @@
+menu "Vehicle Health OS gateway"
+
+config VHOS_STATUS_SOFTAP_AUTOSTART
+    bool "Automatically start the local status SoftAP at boot"
+    default n
+    help
+        Development-bench option only. When enabled, the authenticated read-only
+        status SoftAP starts for 15 minutes after every boot. Keep this disabled
+        for ordinary vehicle and home operation. The production activation path
+        will be an explicit encrypted BLE commissioning command.
+
+endmenu

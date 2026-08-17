@@ -77,6 +77,7 @@ def validate_status_surface(source_dir: Path) -> str:
     implementation = (source_dir / "vhos_status_web.c").read_text(encoding="utf-8")
     header = (source_dir / "vhos_status_web.h").read_text(encoding="utf-8")
     page = (source_dir / "status_page.html").read_text(encoding="utf-8")
+    activation_policy = (source_dir / "Kconfig.projbuild").read_text(encoding="utf-8")
 
     required_fragments = {
         "15-minute commissioning window": "VHOS_STATUS_WINDOW_SECONDS 900U" in header,
@@ -87,6 +88,8 @@ def validate_status_surface(source_dir: Path) -> str:
         "HTTP Basic credential encoding": "mbedtls_base64_encode" in implementation,
         "constant-time credential comparison": "constant_time_equal" in implementation,
         "explicit read-only evidence flag": '"read_only_http", true' in implementation,
+        "default-off activation symbol": "config VHOS_STATUS_SOFTAP_AUTOSTART" in activation_policy,
+        "default-off activation value": "default n" in activation_policy,
     }
     for control, present in required_fragments.items():
         require(present, f"status surface is missing required control: {control}")
@@ -195,6 +198,11 @@ def main() -> None:
     status_surface_check = "not_applicable"
     if args.status_source_dir is not None:
         status_surface_check = validate_status_surface(args.status_source_dir)
+        require(
+            "CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART=y" not in sdkconfig,
+            "release configuration enables status SoftAP autostart",
+        )
+        status_surface_check = "passed:compiled_source-default_off_release"
 
     flash_files = parse_flash_files(args.flasher_args)
     required_flash_offsets = {
