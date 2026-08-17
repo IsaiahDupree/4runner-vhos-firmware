@@ -39,7 +39,7 @@ disruptive. The service remains a development and commissioning surface, not a p
 management interface. Later versions may add explicit encrypted-BLE activation or stronger
 transport security, but they must retain the read-only and no-arbitrary-transmit boundaries.
 
-`v0.1.0-dev.8` adds an NVS-persisted random-static BLE identity. If a full flash or NVS erase
+`v0.1.0-dev.9` adds an NVS-persisted random-static BLE identity. If a full flash or NVS erase
 removes the gateway bond, that same erase removes the identity epoch and the next boot presents a
 new peripheral identity to iOS. This prevents an old iPhone bond from trapping commissioning in a
 connect, encryption-failure, disconnect loop.

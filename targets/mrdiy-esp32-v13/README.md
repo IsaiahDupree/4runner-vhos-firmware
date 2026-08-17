@@ -31,7 +31,7 @@ already implemented.
 
 ## Wi-Fi access-point status
 
-Firmware `v0.1.0-dev.8` contains an authenticated, read-only commissioning surface but keeps it
+Firmware `v0.1.0-dev.9` contains an authenticated, read-only commissioning surface but keeps it
 **off by default**. A normal boot initializes neither Wi-Fi nor HTTP. The earlier unreleased
 `v0.1.0-dev.6` bench behavior started an AP automatically; that policy was withdrawn after a Mac
 joined the no-internet AP and left its normal network.
@@ -79,6 +79,9 @@ Design, evidence, security, and operator rationale are maintained alongside the 
   next boot creates a new identity and iOS treats the gateway as a new peripheral instead of
   repeatedly trying a stale key. Routine recovery therefore does not require **Forget This
   Device**. See [BLE bond-loss recovery](docs/BLE-BOND-LOSS-RECOVERY.md).
+- Advertising uses that random-static identity directly. Resolvable-private address selection is
+  intentionally disabled because it would hide the NVS identity epoch that tells Core Bluetooth
+  the bond was erased.
 - Boot evidence reports both the identity source (`generated` or `persisted`) and the real NimBLE
   bond-record counts. An identity is never used until it has been committed to NVS; failure to
   persist it leaves BLE unavailable rather than changing the address on every reboot.

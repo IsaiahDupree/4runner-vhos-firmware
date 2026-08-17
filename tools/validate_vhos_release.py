@@ -134,7 +134,7 @@ def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
         "identity NVS write": "nvs_set_blob(" in implementation,
         "identity NVS commit": "nvs_commit(handle)" in implementation,
         "random identity installation": "ble_hs_id_set_rnd(identity.val)" in implementation,
-        "random identity selection": "ble_hs_id_infer_auto(1, &own_address_type)" in implementation,
+        "direct random-static identity selection": "ble_hs_id_infer_auto(0, &own_address_type)" in implementation,
         "repeat-pair recovery": "BLE_GAP_REPEAT_PAIRING_RETRY" in implementation,
         "identity epoch evidence": "BLE_IDENTITY_READY type=random-static" in implementation,
     }
@@ -153,6 +153,10 @@ def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
     require(
         "ble_hs_util_ensure_addr(0)" not in implementation,
         "legacy public-address selection bypasses the identity epoch",
+    )
+    require(
+        "ble_hs_id_infer_auto(1, &own_address_type)" not in implementation,
+        "privacy-address advertising hides the persisted identity epoch from iOS",
     )
     return "passed:persistent-random-static-identity-epoch"
 

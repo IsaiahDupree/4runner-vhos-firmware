@@ -600,7 +600,7 @@ static void on_sync(void)
 {
     esp_err_t identity_result = configure_persistent_identity();
     int result = identity_result == ESP_OK
-        ? ble_hs_id_infer_auto(1, &own_address_type)
+        ? ble_hs_id_infer_auto(0, &own_address_type)
         : BLE_HS_ESTORE_CAP;
     if (result != 0) {
         ESP_LOGE(

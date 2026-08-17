@@ -1,6 +1,6 @@
 # BLE bond-loss recovery
 
-Status: implemented in `v0.1.0-dev.8`
+Status: implemented in `v0.1.0-dev.9`
 
 ## Problem
 
@@ -36,7 +36,8 @@ On every NimBLE synchronization:
 2. If it is valid, install it and advertise with that same identity.
 3. If it is absent or malformed, generate a Bluetooth-compliant random-static identity.
 4. Commit the generated identity to NVS before installing or advertising it.
-5. Prefer the random identity when NimBLE selects its own address type.
+5. Advertise the random-static identity directly (`BLE_OWN_ADDR_RANDOM`). Do not select a
+   resolvable-private address, because that would hide the identity epoch from Core Bluetooth.
 
 The identity and bond normally survive together. If NVS is erased, they are lost together. The
 next boot creates a new identity epoch, so Core Bluetooth assigns a new peripheral identity and
@@ -91,7 +92,7 @@ owner records.
 
 1. Back up the full flash before manipulating NVS.
 2. Flash the application partition only and capture the boot log.
-3. Confirm identity source `generated` on the first `v0.1.0-dev.8` boot and record its address.
+3. Confirm identity source `generated` on the first `v0.1.0-dev.9` boot and record its address.
 4. In the iOS app, scan and verify the VHOS service, encrypted link, three notification channels,
    versioned handshake, and live health arrival.
 5. Reboot without erasing NVS.
