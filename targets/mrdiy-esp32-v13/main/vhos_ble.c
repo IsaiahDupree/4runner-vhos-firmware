@@ -33,6 +33,8 @@
 #define VHOS_BLE_SUPERVISION_TIMEOUT 600U
 #define VHOS_BLE_IDENTITY_NAMESPACE "vhos_ble_id"
 #define VHOS_BLE_IDENTITY_KEY "identity_v1"
+#define VHOS_BLE_GATT_SCHEMA_KEY "gatt_schema"
+#define VHOS_BLE_GATT_SCHEMA_VERSION 2U
 
 typedef struct {
     size_t length;
@@ -521,6 +523,19 @@ static esp_err_t persist_identity(nvs_handle_t handle, const ble_addr_t *identit
     return result;
 }
 
+static esp_err_t persist_gatt_schema(nvs_handle_t handle)
+{
+    esp_err_t result = nvs_set_u32(
+        handle,
+        VHOS_BLE_GATT_SCHEMA_KEY,
+        VHOS_BLE_GATT_SCHEMA_VERSION
+    );
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    return result;
+}
+
 static esp_err_t generate_and_persist_identity(
     nvs_handle_t handle,
     ble_addr_t *identity
@@ -561,8 +576,32 @@ static esp_err_t configure_persistent_identity(void)
         identity.val,
         &identity_length
     );
+    bool identity_present = result == ESP_OK && identity_length == sizeof(identity.val);
+    uint32_t stored_gatt_schema = 0;
+    esp_err_t schema_result = nvs_get_u32(
+        handle,
+        VHOS_BLE_GATT_SCHEMA_KEY,
+        &stored_gatt_schema
+    );
+    bool gatt_schema_changed = identity_present &&
+        (schema_result != ESP_OK || stored_gatt_schema != VHOS_BLE_GATT_SCHEMA_VERSION);
     bool generated = false;
-    if (result == ESP_ERR_NVS_NOT_FOUND ||
+    if (gatt_schema_changed) {
+        ESP_LOGW(
+            TAG,
+            "BLE_GATT_SCHEMA_MIGRATION stored=%lu current=%u action=rotate-identity-clear-bonds",
+            schema_result == ESP_OK ? (unsigned long)stored_gatt_schema : 0UL,
+            VHOS_BLE_GATT_SCHEMA_VERSION
+        );
+        int clear_result = ble_store_clear();
+        if (clear_result != 0) {
+            ESP_LOGE(TAG, "Unable to clear BLE bonds for GATT migration: rc=%d", clear_result);
+            result = ESP_FAIL;
+        } else {
+            result = generate_and_persist_identity(handle, &identity);
+            generated = result == ESP_OK;
+        }
+    } else if (result == ESP_ERR_NVS_NOT_FOUND ||
         result == ESP_ERR_NVS_INVALID_LENGTH ||
         (result == ESP_OK && identity_length != sizeof(identity.val))) {
         ESP_LOGW(
@@ -571,8 +610,14 @@ static esp_err_t configure_persistent_identity(void)
             esp_err_to_name(result),
             (unsigned int)identity_length
         );
-        result = generate_and_persist_identity(handle, &identity);
-        generated = result == ESP_OK;
+        int clear_result = ble_store_clear();
+        if (clear_result != 0) {
+            ESP_LOGE(TAG, "Unable to clear BLE bonds for identity rotation: rc=%d", clear_result);
+            result = ESP_FAIL;
+        } else {
+            result = generate_and_persist_identity(handle, &identity);
+            generated = result == ESP_OK;
+        }
     } else if (result != ESP_OK) {
         ESP_LOGE(TAG, "Unable to load BLE identity: %s", esp_err_to_name(result));
     }
@@ -585,15 +630,29 @@ static esp_err_t configure_persistent_identity(void)
                 "Persisted BLE identity rejected; rotating bond epoch: rc=%d",
                 host_result
             );
-            result = generate_and_persist_identity(handle, &identity);
-            generated = result == ESP_OK;
-            if (result == ESP_OK) {
-                host_result = ble_hs_id_set_rnd(identity.val);
+            int clear_result = ble_store_clear();
+            if (clear_result != 0) {
+                ESP_LOGE(TAG, "Unable to clear BLE bonds for identity recovery: rc=%d", clear_result);
+                result = ESP_FAIL;
+            } else {
+                result = generate_and_persist_identity(handle, &identity);
+                generated = result == ESP_OK;
+                if (result == ESP_OK) {
+                    host_result = ble_hs_id_set_rnd(identity.val);
+                }
             }
         }
         if (result == ESP_OK && host_result != 0) {
             ESP_LOGE(TAG, "Unable to install BLE identity: rc=%d", host_result);
             result = ESP_FAIL;
+        }
+    }
+
+    if (result == ESP_OK &&
+        (schema_result != ESP_OK || stored_gatt_schema != VHOS_BLE_GATT_SCHEMA_VERSION)) {
+        result = persist_gatt_schema(handle);
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "Unable to persist BLE GATT schema: %s", esp_err_to_name(result));
         }
     }
 
@@ -603,8 +662,9 @@ static esp_err_t configure_persistent_identity(void)
     }
     ESP_LOGI(
         TAG,
-        "BLE_IDENTITY_READY type=random-static source=%s address=%02x:%02x:%02x:%02x:%02x:%02x",
+        "BLE_IDENTITY_READY type=random-static source=%s gatt_schema=%u address=%02x:%02x:%02x:%02x:%02x:%02x",
         generated ? "generated" : "persisted",
+        VHOS_BLE_GATT_SCHEMA_VERSION,
         identity.val[5],
         identity.val[4],
         identity.val[3],

@@ -18,12 +18,18 @@ jobs:
           submodules: recursive
       - name: Build, merge, and validate
         shell: bash
+        env:
+          VHOS_MRDIY_SIGNING_KEY_PEM: ${{ secrets.VHOS_MRDIY_SIGNING_KEY_PEM }}
         run: |
           source /opt/esp/idf/export.sh
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           ln -s "$GITHUB_WORKSPACE" /project
           bash tools/build_vhos_release.sh v0.1.0-dev.1
-          bash tools/build_mrdiy_v13_release.sh v0.1.0-dev.7
+          test -n "$VHOS_MRDIY_SIGNING_KEY_PEM"
+          install -m 0600 /dev/null /tmp/vhos-mrdiy-signing-key.pem
+          printf '%s' "$VHOS_MRDIY_SIGNING_KEY_PEM" > /tmp/vhos-mrdiy-signing-key.pem
+          VHOS_SECURE_BOOT_SIGNING_KEY=/tmp/vhos-mrdiy-signing-key.pem \
+            bash tools/build_mrdiy_v13_release.sh v0.1.0-dev.13
       - uses: actions/upload-artifact@v4
         with:
           name: vhos-gateway-development

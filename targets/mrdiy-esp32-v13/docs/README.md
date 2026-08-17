@@ -14,6 +14,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [SoftAP security](SOFTAP-STATUS-SECURITY.md) | Threat model, authentication, credential lifecycle, attack-surface controls, and residual risks. |
 | [SoftAP operations and verification](SOFTAP-STATUS-OPERATIONS.md) | Connection procedure, physical test plan, failure diagnosis, acceptance evidence, and recovery. |
 | [BLE bond-loss recovery](BLE-BOND-LOSS-RECOVERY.md) | Persistent identity epochs, automatic recovery after NVS loss, failure behavior, and acceptance tests. |
+| [BLE GATT schema migration](BLE-GATT-SCHEMA-MIGRATION.md) | One-time identity and bond migration after a service-database change, avoiding stale iOS GATT caches and manual device forgetting. |
 | [Passive CAN discovery](PASSIVE-CAN-DISCOVERY.md) | Bounded 500/250-kbit listen-only probing, lock evidence, safety boundaries, and vehicle acceptance. |
 | [Passive CAN flight recorder](PASSIVE-CAN-FLIGHT-RECORDER.md) | Offline capture, sampling, flash retention, record framing, resumable BLE transfer, iPhone storage, export, and field workflow. |
 | [Authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md) | Explicit encrypted-BLE activation, one-shot network credentials, signed image upload, A/B probationary boot, rollback, and acceptance gates. |
@@ -60,3 +61,7 @@ retention; the firmware still compiles no vehicle-bus transmit command.
 owner request, accepts one bearer-authenticated signed application upload, writes only the inactive
 A/B slot, and expires after five minutes. This does not add OTA authority to the read-only status
 surface and does not change the default-off Wi-Fi policy.
+
+`v0.1.0-dev.13` adds an NVS-persisted GATT schema version. A schema mismatch clears obsolete bond
+and CCCD records and rotates the random-static identity exactly once, forcing iOS to discover the
+new database automatically while preserving CAN captures and every unrelated storage namespace.

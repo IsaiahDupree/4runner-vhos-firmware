@@ -46,6 +46,12 @@ blocked until motion and gateway supply are deterministically reported and the p
 upload/power-loss/rollback matrix passes. See
 [authenticated temporary Wi-Fi OTA](docs/AUTHENTICATED-WIFI-OTA.md).
 
+Firmware `v0.1.0-dev.13` versions the BLE GATT schema alongside the persisted random-static
+identity. When a firmware update changes the service or characteristic database, the gateway clears
+obsolete bond records and rotates its BLE identity once. iOS therefore performs fresh service
+discovery automatically instead of trapping the app in `VALIDATING` or requiring the owner to use
+“Forget This Device.” See [BLE GATT schema migration](docs/BLE-GATT-SCHEMA-MIGRATION.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
