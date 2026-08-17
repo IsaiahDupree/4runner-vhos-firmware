@@ -16,6 +16,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [BLE bond-loss recovery](BLE-BOND-LOSS-RECOVERY.md) | Persistent identity epochs, automatic recovery after NVS loss, failure behavior, and acceptance tests. |
 | [Passive CAN discovery](PASSIVE-CAN-DISCOVERY.md) | Bounded 500/250-kbit listen-only probing, lock evidence, safety boundaries, and vehicle acceptance. |
 | [Passive CAN flight recorder](PASSIVE-CAN-FLIGHT-RECORDER.md) | Offline capture, sampling, flash retention, record framing, resumable BLE transfer, iPhone storage, export, and field workflow. |
+| [Authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md) | Explicit encrypted-BLE activation, one-shot network credentials, signed image upload, A/B probationary boot, rollback, and acceptance gates. |
 
 ## Governing rule
 
@@ -53,3 +54,8 @@ frame.
 `v0.1.0-dev.11` adds a CRC-protected passive flight recorder and resumable encrypted-BLE log
 transfer. The recorder is autonomous of the phone and its commands affect only local evidence
 retention; the firmware still compiles no vehicle-bus transmit command.
+
+`v0.1.0-dev.12` adds a separate temporary OTA service. It starts only after an encrypted BLE
+owner request, accepts one bearer-authenticated signed application upload, writes only the inactive
+A/B slot, and expires after five minutes. This does not add OTA authority to the read-only status
+surface and does not change the default-off Wi-Fi policy.

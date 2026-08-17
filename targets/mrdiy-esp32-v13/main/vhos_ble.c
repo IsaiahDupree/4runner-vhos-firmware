@@ -36,7 +36,7 @@
 
 typedef struct {
     size_t length;
-    bool health_channel;
+    vhos_transport_channel_t channel;
     uint8_t data[VHOS_BLE_TX_MAX_BYTES];
 } vhos_ble_tx_item_t;
 
@@ -49,6 +49,7 @@ static uint16_t status_value_handle;
 static uint16_t ota_status_value_handle;
 static bool stream_notify_enabled;
 static bool status_notify_enabled;
+static bool ota_status_notify_enabled;
 static bool link_encrypted;
 static bool host_ready;
 static bool advertising_active;
@@ -156,14 +157,18 @@ static const struct ble_gatt_svc_def services[] = {
     {0},
 };
 
-static esp_err_t emit_frame(const uint8_t *data, size_t length, bool health_channel)
+static esp_err_t emit_frame(
+    const uint8_t *data,
+    size_t length,
+    vhos_transport_channel_t channel
+)
 {
     if (data == NULL || length == 0 || length > VHOS_BLE_TX_MAX_BYTES || tx_queue == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     vhos_ble_tx_item_t item = {
         .length = length,
-        .health_channel = health_channel,
+        .channel = channel,
     };
     memcpy(item.data, data, length);
     return xQueueSend(tx_queue, &item, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
@@ -178,8 +183,18 @@ static void tx_task(void *argument)
             continue;
         }
         portENTER_CRITICAL(&state_lock);
-        bool subscribed = item.health_channel ? status_notify_enabled : stream_notify_enabled;
-        uint16_t value_handle = item.health_channel ? status_value_handle : stream_value_handle;
+        bool subscribed;
+        uint16_t value_handle;
+        if (item.channel == VHOS_TRANSPORT_CHANNEL_HEALTH) {
+            subscribed = status_notify_enabled;
+            value_handle = status_value_handle;
+        } else if (item.channel == VHOS_TRANSPORT_CHANNEL_OTA) {
+            subscribed = ota_status_notify_enabled;
+            value_handle = ota_status_value_handle;
+        } else {
+            subscribed = stream_notify_enabled;
+            value_handle = stream_value_handle;
+        }
         uint16_t active_connection = connection_handle;
         portEXIT_CRITICAL(&state_lock);
         if (!subscribed || active_connection == BLE_HS_CONN_HANDLE_NONE) {
@@ -349,6 +364,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         link_encrypted = false;
         stream_notify_enabled = false;
         status_notify_enabled = false;
+        ota_status_notify_enabled = false;
         connection_parameters_available = false;
         active_att_mtu = 0;
         active_connection_interval = 0;
@@ -383,6 +399,8 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             stream_notify_enabled = event->subscribe.cur_notify;
         } else if (event->subscribe.attr_handle == status_value_handle) {
             status_notify_enabled = event->subscribe.cur_notify;
+        } else if (event->subscribe.attr_handle == ota_status_value_handle) {
+            ota_status_notify_enabled = event->subscribe.cur_notify;
         }
         portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(
@@ -482,6 +500,7 @@ static void on_reset(int reason)
     link_encrypted = false;
     stream_notify_enabled = false;
     status_notify_enabled = false;
+    ota_status_notify_enabled = false;
     connection_parameters_available = false;
     active_att_mtu = 0;
     portEXIT_CRITICAL(&state_lock);
@@ -749,6 +768,7 @@ esp_err_t vhos_ble_get_health(vhos_ble_health_t *health)
     health->encrypted = link_encrypted;
     health->stream_subscribed = stream_notify_enabled;
     health->health_subscribed = status_notify_enabled;
+    health->ota_subscribed = ota_status_notify_enabled;
     health->connection_parameters_available = connection_parameters_available;
     health->att_mtu = active_att_mtu;
     health->connection_interval_units = active_connection_interval;

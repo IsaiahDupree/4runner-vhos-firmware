@@ -12,6 +12,7 @@ typedef struct {
     bool encrypted;
     bool stream_subscribed;
     bool health_subscribed;
+    bool ota_subscribed;
     bool connection_parameters_available;
     uint16_t att_mtu;
     uint16_t connection_interval_units;

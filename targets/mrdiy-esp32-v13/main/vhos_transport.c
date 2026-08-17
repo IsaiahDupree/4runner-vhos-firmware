@@ -2,11 +2,13 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "cJSON.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "vhos_can.h"
 #include "vhos_capture_store.h"
+#include "vhos_ota_wifi.h"
 
 #define VHOS_HEADER_BYTES 36U
 #define VHOS_MAX_PAYLOAD_BYTES 1024U
@@ -14,6 +16,7 @@
 #define VHOS_MESSAGE_HANDSHAKE 1U
 #define VHOS_MESSAGE_RAW_CAN_FRAME 2U
 #define VHOS_MESSAGE_GATEWAY_HEALTH 4U
+#define VHOS_MESSAGE_OTA_CONTROL 8U
 #define VHOS_MESSAGE_CAPTURE_LOG_REQUEST 11U
 #define VHOS_MESSAGE_CAPTURE_LOG_INDEX 12U
 #define VHOS_MESSAGE_CAPTURE_LOG_CHUNK 13U
@@ -26,11 +29,19 @@
 #define VHOS_BUILD_ID "source-tree"
 #endif
 
-#ifdef CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART
-#define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
+#if defined(CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT) || defined(CONFIG_SECURE_BOOT)
+#define VHOS_SIGNED_OTA_CAPABILITY ",\"ota.signed-image\""
 #else
-#define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\"]"
+#define VHOS_SIGNED_OTA_CAPABILITY ""
 #endif
+
+#ifdef CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART
+#define VHOS_STATUS_CAPABILITY ",\"status.softap.readonly\""
+#else
+#define VHOS_STATUS_CAPABILITY ""
+#endif
+
+#define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\"" VHOS_SIGNED_OTA_CAPABILITY VHOS_STATUS_CAPABILITY "]"
 
 static uint8_t rx_buffer[VHOS_MAX_FRAME_BYTES];
 static size_t rx_length;
@@ -87,7 +98,7 @@ static esp_err_t send_payload(
     uint8_t message_type,
     const uint8_t *payload,
     size_t payload_length,
-    bool health_channel
+    vhos_transport_channel_t channel
 )
 {
     if (emit_frame == NULL || (payload == NULL && payload_length > 0) || send_lock == NULL) {
@@ -113,12 +124,16 @@ static esp_err_t send_payload(
     if (payload_length > 0) {
         memcpy(&frame[VHOS_HEADER_BYTES], payload, payload_length);
     }
-    esp_err_t result = emit_frame(frame, VHOS_HEADER_BYTES + payload_length, health_channel);
+    esp_err_t result = emit_frame(frame, VHOS_HEADER_BYTES + payload_length, channel);
     xSemaphoreGive(send_lock);
     return result;
 }
 
-static esp_err_t send_json(uint8_t message_type, const char *payload, bool health_channel)
+static esp_err_t send_json(
+    uint8_t message_type,
+    const char *payload,
+    vhos_transport_channel_t channel
+)
 {
     if (payload == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -127,7 +142,7 @@ static esp_err_t send_json(uint8_t message_type, const char *payload, bool healt
         message_type,
         (const uint8_t *)payload,
         strlen(payload),
-        health_channel
+        channel
     );
 }
 
@@ -138,27 +153,44 @@ static esp_err_t send_handshake(void)
         payload,
         sizeof(payload),
         "{\"active_config_id\":\"mrdiy-v13-passive-can-scan\","
-        "\"active_config_version\":\"0.3.0\","
+        "\"active_config_version\":\"0.4.0\","
         "\"bootloader_version\":\"esp-idf-5.5.3\","
         "\"capabilities\":%s,"
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.11\","
+        "\"firmware_version\":\"0.1.0-dev.12\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
-        "\"ota_maximum_image_bytes\":null,"
-        "\"ota_upload_url\":null,"
+        "\"ota_maximum_image_bytes\":%u,"
+        "\"ota_upload_url\":\"http://192.168.4.1/api/v1/ota/image\","
         "\"protocol_version\":\"1.0.0\"}",
         VHOS_CAPABILITIES,
         VHOS_BUILD_ID,
-        gateway_id_value
+        gateway_id_value,
+        VHOS_OTA_MAX_IMAGE_BYTES
     );
     if (length < 0 || (size_t)length >= sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_json(VHOS_MESSAGE_HANDSHAKE, payload, false);
+    esp_err_t result = send_json(
+        VHOS_MESSAGE_HANDSHAKE,
+        payload,
+        VHOS_TRANSPORT_CHANNEL_STREAM
+    );
+    if (result == ESP_OK) {
+        esp_err_t status_result = vhos_ota_wifi_send_last_status();
+        if (status_result != ESP_OK && status_result != ESP_ERR_NOT_FOUND) {
+            return status_result;
+        }
+    }
+    return result;
+}
+
+esp_err_t vhos_transport_send_ota_status(const char *json)
+{
+    return send_json(VHOS_MESSAGE_OTA_CONTROL, json, VHOS_TRANSPORT_CHANNEL_OTA);
 }
 
 esp_err_t vhos_transport_send_health(void)
@@ -231,7 +263,11 @@ esp_err_t vhos_transport_send_health(void)
     if (length < 0 || (size_t)length >= sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    return send_json(VHOS_MESSAGE_GATEWAY_HEALTH, payload, true);
+    return send_json(
+        VHOS_MESSAGE_GATEWAY_HEALTH,
+        payload,
+        VHOS_TRANSPORT_CHANNEL_HEALTH
+    );
 }
 
 static esp_err_t send_capture_log_index(void)
@@ -273,7 +309,11 @@ static esp_err_t send_capture_log_index(void)
     if (result != ESP_OK || length < 0 || (size_t)length >= sizeof(payload)) {
         return result == ESP_OK ? ESP_ERR_INVALID_SIZE : result;
     }
-    return send_json(VHOS_MESSAGE_CAPTURE_LOG_INDEX, payload, false);
+    return send_json(
+        VHOS_MESSAGE_CAPTURE_LOG_INDEX,
+        payload,
+        VHOS_TRANSPORT_CHANNEL_STREAM
+    );
 }
 
 static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
@@ -317,7 +357,7 @@ static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
         VHOS_MESSAGE_CAPTURE_LOG_CHUNK,
         payload,
         VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES + data_length,
-        false
+        VHOS_TRANSPORT_CHANNEL_STREAM
     );
 }
 
@@ -349,7 +389,90 @@ static void send_live_can_observation(
     write_u64_le(&payload[16], observation->monotonic_us);
     write_u32_le(&payload[24], vhos_capture_store_current_session_id());
     memcpy(&payload[28], observation->data, 8);
-    send_payload(VHOS_MESSAGE_RAW_CAN_FRAME, payload, sizeof(payload), false);
+    send_payload(
+        VHOS_MESSAGE_RAW_CAN_FRAME,
+        payload,
+        sizeof(payload),
+        VHOS_TRANSPORT_CHANNEL_STREAM
+    );
+}
+
+static bool copy_json_string(
+    const cJSON *root,
+    const char *key,
+    char *destination,
+    size_t capacity
+)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    if (!cJSON_IsString(item) || item->valuestring == NULL ||
+        strlcpy(destination, item->valuestring, capacity) >= capacity) {
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t process_ota_control(const uint8_t *payload, size_t payload_length)
+{
+#if !defined(CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT) && !defined(CONFIG_SECURE_BOOT)
+    (void)payload;
+    (void)payload_length;
+    return ESP_ERR_NOT_SUPPORTED;
+#else
+    if (payload == NULL || payload_length == 0 || payload_length > VHOS_MAX_PAYLOAD_BYTES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    cJSON *root = cJSON_ParseWithLength((const char *)payload, payload_length);
+    if (root == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    char contract[48];
+    char operation[16];
+    bool valid = copy_json_string(root, "contract", contract, sizeof(contract)) &&
+                 copy_json_string(root, "operation", operation, sizeof(operation)) &&
+                 strcmp(contract, "gateway.ota-control-request") == 0;
+    if (!valid) {
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strcmp(operation, "CANCEL") == 0) {
+        cJSON_Delete(root);
+        return vhos_ota_wifi_cancel();
+    }
+    if (strcmp(operation, "ACTIVATE") != 0) {
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    vhos_ota_activation_request_t request = {0};
+    const cJSON *size = cJSON_GetObjectItemCaseSensitive(root, "firmware_size_bytes");
+    valid = copy_json_string(
+                root,
+                "package_id",
+                request.package_id,
+                sizeof(request.package_id)
+            ) &&
+            copy_json_string(
+                root,
+                "firmware_version",
+                request.firmware_version,
+                sizeof(request.firmware_version)
+            ) &&
+            copy_json_string(
+                root,
+                "firmware_sha256",
+                request.firmware_sha256,
+                sizeof(request.firmware_sha256)
+            ) &&
+            cJSON_IsNumber(size) && size->valuedouble > 0 &&
+            size->valuedouble <= VHOS_OTA_MAX_IMAGE_BYTES &&
+            size->valuedouble == (double)(uint32_t)size->valuedouble;
+    if (valid) {
+        request.firmware_size_bytes = (uint32_t)size->valuedouble;
+    }
+    cJSON_Delete(root);
+    return valid ? vhos_ota_wifi_activate(&request) : ESP_ERR_INVALID_ARG;
+#endif
 }
 
 static esp_err_t process_frame(const uint8_t *frame, size_t length)
@@ -369,6 +492,10 @@ static esp_err_t process_frame(const uint8_t *frame, size_t length)
     if (frame[6] == VHOS_MESSAGE_HANDSHAKE) {
         esp_err_t result = send_handshake();
         return result == ESP_OK ? vhos_transport_send_health() : result;
+    }
+
+    if (frame[6] == VHOS_MESSAGE_OTA_CONTROL) {
+        return process_ota_control(&frame[VHOS_HEADER_BYTES], payload_length);
     }
 
     if (frame[6] == VHOS_MESSAGE_CAPTURE_LOG_REQUEST &&
@@ -405,6 +532,7 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
         strlcpy(gateway_id_value, gateway_id, sizeof(gateway_id_value));
     }
     emit_frame = emit;
+    vhos_ota_wifi_init(gateway_id_value, vhos_transport_send_ota_status);
     if (send_lock == NULL) {
         send_lock = xSemaphoreCreateMutex();
     }

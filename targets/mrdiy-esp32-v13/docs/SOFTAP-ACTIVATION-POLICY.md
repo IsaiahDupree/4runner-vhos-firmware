@@ -63,9 +63,14 @@ BOOT
        ACTIVE -- 900 s deadline or power cycle ---------------+
 ```
 
-The future BLE request may turn the read-only observer on; it may not extend the deadline, expose
-credentials, weaken CAN listen-only mode, or authorize diagnostics, OTA writes, reboot, erase, or
-configuration changes.
+The future BLE request may turn the read-only observer on; that observer may not extend the
+deadline, expose credentials, weaken CAN listen-only mode, or authorize diagnostics, OTA writes,
+reboot, erase, or configuration changes.
+
+Firmware `v0.1.0-dev.12` adds a **separate** temporary OTA service with its own encrypted-BLE
+activation contract, random per-session credentials, five-minute lease, single POST route, signed
+image verification, and A/B rollback. It does not add write authority to the status observer. See
+[authenticated temporary Wi-Fi OTA](AUTHENTICATED-WIFI-OTA.md).
 
 ## 5. Mac test hygiene
 
@@ -90,4 +95,3 @@ The test is incomplete unless all of these are true:
 - An explicit activation implementation is not advertised as a capability until the iOS command,
   firmware authorization, response evidence, timeout, and physical coexistence tests all pass.
 - No release uses passive Mac detection or missing proximity evidence to turn the AP on.
-

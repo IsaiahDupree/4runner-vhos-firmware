@@ -7,6 +7,7 @@
 #include "vhos_ble.h"
 #include "vhos_can.h"
 #include "vhos_capture_store.h"
+#include "vhos_ota_wifi.h"
 #include "vhos_status_web.h"
 #include "vhos_transport.h"
 
@@ -16,12 +17,21 @@ static const char *TAG = "vhos_main";
 #define VHOS_BUILD_ID "source-tree"
 #endif
 
-static void confirm_running_image(void)
+static void confirm_running_image(esp_err_t capture_result)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
     if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
         state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (capture_result != ESP_OK) {
+            ESP_LOGE(
+                TAG,
+                "OTA_ROLLBACK_SELF_TEST_FAIL partition=%s capture_store=%s",
+                running->label,
+                esp_err_to_name(capture_result)
+            );
+            ESP_ERROR_CHECK(esp_ota_mark_app_invalid_rollback_and_reboot());
+        }
         ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
         ESP_LOGI(TAG, "OTA_ROLLBACK_SELF_TEST_PASS partition=%s", running->label);
     }
@@ -72,12 +82,13 @@ void app_main(void)
         "VHOS_SOFTAP_DISABLED reason=default-safe-policy activation=encrypted-ble-pending"
     );
 #endif
-    confirm_running_image();
+    confirm_running_image(capture_result);
+    vhos_ota_wifi_reconcile_boot();
 
     const esp_app_desc_t *description = esp_app_get_description();
     ESP_LOGI(
         TAG,
-        "VHOS_SELF_TEST_PASS firmware=%s build=%s gateway=%s target=mrdiy-v1.3+ softap_status=%s read_only=true",
+        "VHOS_SELF_TEST_PASS firmware=%s build=%s gateway=%s target=mrdiy-v1.3+ softap_status=%s vehicle_bus_read_only=true",
         description->version,
         VHOS_BUILD_ID,
         gateway_id,

@@ -182,6 +182,62 @@ def validate_passive_can_probe(source_dir: Path) -> str:
     return "passed:500k-250k-listen-only-multiframe-lock"
 
 
+def validate_authenticated_wifi_ota(source_dir: Path, sdkconfig: str) -> str:
+    implementation_path = source_dir / "vhos_ota_wifi.c"
+    transport_path = source_dir / "vhos_transport.c"
+    ble_path = source_dir / "vhos_ble.c"
+    require(implementation_path.is_file(), "authenticated Wi-Fi OTA implementation is missing")
+    implementation = implementation_path.read_text(encoding="utf-8")
+    transport = transport_path.read_text(encoding="utf-8")
+    ble = ble_path.read_text(encoding="utf-8")
+
+    required_configuration = {
+        "signed application updates": "CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y" in sdkconfig,
+        "ECDSA signed-app scheme": "CONFIG_SECURE_SIGNED_APPS_ECDSA_SCHEME=y" in sdkconfig,
+        "pinned verification key": "CONFIG_SECURE_BOOT_VERIFICATION_KEY=" in sdkconfig,
+        "A/B rollback": "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in sdkconfig,
+        "no release-time private key": "CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set" in sdkconfig,
+    }
+    for control, present in required_configuration.items():
+        require(present, f"authenticated Wi-Fi OTA is missing configuration control: {control}")
+
+    required_implementation = {
+        "encrypted BLE activation": "!ble.connected || !ble.encrypted" in implementation,
+        "listen-only gate": "!can.controller_running || !can.listen_only" in implementation,
+        "capture pause": "vhos_capture_store_set_logging(false)" in implementation,
+        "capture recovery": "vhos_capture_store_set_logging(true)" in implementation,
+        "five-minute lease": "VHOS_OTA_SESSION_WINDOW_SECONDS 300U" in (source_dir / "vhos_ota_wifi.h").read_text(encoding="utf-8"),
+        "random network credentials": "esp_fill_random" in implementation,
+        "hidden network": "configuration.ap.ssid_hidden = 1" in implementation,
+        "WPA2": "WIFI_AUTH_WPA2_PSK" in implementation,
+        "protected management frames": "configuration.ap.pmf_cfg.required = true" in implementation,
+        "one-station limit": "configuration.ap.max_connection = 1" in implementation,
+        "bearer authorization": 'httpd_req_get_hdr_value_str(request, "Authorization"' in implementation,
+        "constant-time token comparison": "constant_time_equal" in implementation,
+        "inactive OTA partition": "esp_ota_get_next_update_partition(NULL)" in implementation,
+        "streaming partition write": "esp_ota_write(" in implementation,
+        "whole-image SHA-256": "mbedtls_sha256_update" in implementation,
+        "native signature verification": "esp_ota_end(" in implementation,
+        "probationary boot selection": "esp_ota_set_boot_partition(" in implementation,
+        "persisted outcome": 'persist_outcome(' in implementation,
+        "explicit BLE command": "VHOS_MESSAGE_OTA_CONTROL" in transport,
+        "signed capability": 'ota.signed-image' in transport,
+        "encrypted command characteristic": "BLE_GATT_CHR_F_WRITE_ENC" in ble,
+        "encrypted OTA status characteristic": "BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC" in ble,
+    }
+    for control, present in required_implementation.items():
+        require(present, f"authenticated Wi-Fi OTA is missing implementation control: {control}")
+
+    require(
+        "vhos_ota_wifi_activate" not in (source_dir / "main.c").read_text(encoding="utf-8"),
+        "normal boot path must not activate the OTA network",
+    )
+    require("twai_transmit" not in implementation, "OTA implementation contains CAN transmit authority")
+    require("HTTP_GET" not in implementation, "OTA service must not expose an observer or browser route")
+    require(implementation.count("HTTP_POST") == 1, "OTA service must expose exactly one POST route")
+    return "passed:encrypted-ble-lease-wpa2-bearer-sha256-native-signature-ab-rollback"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release", required=True)
@@ -277,6 +333,15 @@ def main() -> None:
             sdkconfig,
         )
 
+    authenticated_wifi_ota_check = "not_applicable"
+    if args.listen_only_source_dir is not None and (
+        args.listen_only_source_dir / "vhos_ota_wifi.c"
+    ).is_file():
+        authenticated_wifi_ota_check = validate_authenticated_wifi_ota(
+            args.listen_only_source_dir,
+            sdkconfig,
+        )
+
     flash_files = parse_flash_files(args.flasher_args)
     required_flash_offsets = {
         args.bootloader_offset,
@@ -336,6 +401,7 @@ def main() -> None:
             "passiveCanBitrateProbe": passive_can_probe_check,
             "bleBondLossIdentityRecovery": ble_bond_loss_recovery_check,
             "authenticatedReadOnlyStatusSurface": status_surface_check,
+            "authenticatedTemporaryWiFiOTA": authenticated_wifi_ota_check,
             "physicalBackupFlashRollbackRestore": args.physical_recovery_status,
         },
         "partitions": partitions,

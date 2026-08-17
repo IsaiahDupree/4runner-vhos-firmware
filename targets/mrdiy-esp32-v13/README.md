@@ -39,9 +39,12 @@ suppressed, queued, retained, dropped, and failed-write count. An encrypted BLE 
 chunked downloads without enabling Wi-Fi. See
 [passive CAN flight recorder](docs/PASSIVE-CAN-FLIGHT-RECORDER.md).
 
-The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rollback
-enabled. This is recovery groundwork, not a claim that a Wi-Fi OTA upload endpoint is
-already implemented.
+The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rollback enabled.
+Firmware `v0.1.0-dev.12` adds an explicitly activated, five-minute, authenticated Wi-Fi upload to
+the inactive slot with ESP-IDF native signed-application verification. Vehicle installation remains
+blocked until motion and gateway supply are deterministically reported and the physical
+upload/power-loss/rollback matrix passes. See
+[authenticated temporary Wi-Fi OTA](docs/AUTHENTICATED-WIFI-OTA.md).
 
 ## Wi-Fi access-point status
 
@@ -81,6 +84,7 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 - [`docs/SOFTAP-STATUS-OPERATIONS.md`](docs/SOFTAP-STATUS-OPERATIONS.md) — commissioning and acceptance procedure
 - [`docs/PASSIVE-CAN-DISCOVERY.md`](docs/PASSIVE-CAN-DISCOVERY.md) — safe bitrate probe, evidence, and limits
 - [`docs/PASSIVE-CAN-FLIGHT-RECORDER.md`](docs/PASSIVE-CAN-FLIGHT-RECORDER.md) — persistent capture, BLE sync, record format, and low-trip workflow
+- [`docs/AUTHENTICATED-WIFI-OTA.md`](docs/AUTHENTICATED-WIFI-OTA.md) — encrypted-BLE activation, temporary network, signed image, A/B rollback, and physical acceptance
 
 ## BLE commissioning
 
