@@ -82,8 +82,12 @@
         <div class="row"><dt>Controller</dt><dd id="can-controller">—</dd></div>
         <div class="row"><dt>Listen-only guard</dt><dd id="can-listen">—</dd></div>
         <div class="row"><dt>Bus detected</dt><dd id="can-detected">—</dd></div>
+        <div class="row"><dt>Passive probe</dt><dd id="can-probe">—</dd></div>
+        <div class="row"><dt>Passive candidate</dt><dd id="can-candidate">—</dd></div>
         <div class="row"><dt>Bitrate</dt><dd id="can-bitrate">—</dd></div>
         <div class="row"><dt>Received frames</dt><dd id="can-received">—</dd></div>
+        <div class="row"><dt>Standard / extended</dt><dd id="can-formats">—</dd></div>
+        <div class="row"><dt>500k / 250k frames</dt><dd id="can-rates">—</dd></div>
         <div class="row"><dt>Dropped frames</dt><dd id="can-dropped">—</dd></div>
         <div class="row"><dt>Bus errors</dt><dd id="can-errors">—</dd></div>
         <div class="row"><dt>Bus-off events</dt><dd id="can-off">—</dd></div>
@@ -155,8 +159,12 @@
       flag("can-controller", status.vehicle_bus.controller_running, "RUNNING", "NOT RUNNING");
       flag("can-listen", status.vehicle_bus.listen_only, "ENFORCED", "FAILED");
       flag("can-detected", status.vehicle_bus.bus_detected, "DETECTED", "NOT DETECTED");
+      show("can-probe", `${status.vehicle_bus.scan_state} · cycle ${status.vehicle_bus.scan_cycles}`, status.vehicle_bus.passive_lock ? "pass" : "wait");
+      show("can-candidate", status.vehicle_bus.passive_can_candidate, status.vehicle_bus.passive_can_candidate === null ? "wait" : "pass");
       show("can-bitrate", `${Number(status.vehicle_bus.bitrate_bps).toLocaleString()} bps`);
       show("can-received", status.vehicle_bus.received_frames);
+      show("can-formats", `${status.vehicle_bus.standard_frames} / ${status.vehicle_bus.extended_frames}`);
+      show("can-rates", `${status.vehicle_bus.frames_500k} / ${status.vehicle_bus.frames_250k}`);
       show("can-dropped", status.vehicle_bus.dropped_frames, status.vehicle_bus.dropped_frames === 0 ? "pass" : "wait");
       show("can-errors", status.vehicle_bus.bus_error_count, status.vehicle_bus.bus_error_count === 0 ? "pass" : "wait");
       show("can-off", status.vehicle_bus.bus_off_count, status.vehicle_bus.bus_off_count === 0 ? "pass" : "fail");

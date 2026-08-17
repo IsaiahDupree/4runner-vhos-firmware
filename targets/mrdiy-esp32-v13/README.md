@@ -10,7 +10,7 @@ image.
 - CAN RX: GPIO 4
 - CAN TX: GPIO 5
 - CAN controller mode: forced `TWAI_MODE_LISTEN_ONLY`
-- Initial passive bus timing: 500 kbit/s, matching the recovered factory image
+- Initial passive bus timing: 500 kbit/s, followed by bounded 500/250-kbit observation windows
 - No raw transmit, ELM327 command, or active diagnostic path is compiled into this target
 
 The pin assignment and 500 kbit/s factory default are traceable to the recovered
@@ -25,13 +25,20 @@ and the enforced listen-only state. Supply voltage, motion, capture storage, pro
 confirmation, active OBD queries, and Wi-Fi OTA upload remain unavailable until their real
 implementations land; the app therefore shows those states as unavailable or pending.
 
+Firmware `v0.1.0-dev.10` alternates bounded 10-second listen-only windows at 500 and 250 kbit/s
+until at least three valid CAN frames establish a passive lock. It reports the active bitrate,
+probe state, standard/extended frame counts, per-bitrate counts, and a passive CAN candidate. A
+passive lock proves only that valid CAN traffic was observed; `obd_protocol_confirmed` remains
+false until a separately authorized diagnostic read succeeds. See
+[passive CAN discovery](docs/PASSIVE-CAN-DISCOVERY.md).
+
 The 4 MB partition table has two 1.5 MB OTA application slots and bootloader rollback
 enabled. This is recovery groundwork, not a claim that a Wi-Fi OTA upload endpoint is
 already implemented.
 
 ## Wi-Fi access-point status
 
-Firmware `v0.1.0-dev.9` contains an authenticated, read-only commissioning surface but keeps it
+Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
 **off by default**. A normal boot initializes neither Wi-Fi nor HTTP. The earlier unreleased
 `v0.1.0-dev.6` bench behavior started an AP automatically; that policy was withdrawn after a Mac
 joined the no-internet AP and left its normal network.
@@ -65,6 +72,7 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 - [`docs/SOFTAP-STATUS-API.md`](docs/SOFTAP-STATUS-API.md) — route and field contract
 - [`docs/SOFTAP-STATUS-SECURITY.md`](docs/SOFTAP-STATUS-SECURITY.md) — threat model and authority matrix
 - [`docs/SOFTAP-STATUS-OPERATIONS.md`](docs/SOFTAP-STATUS-OPERATIONS.md) — commissioning and acceptance procedure
+- [`docs/PASSIVE-CAN-DISCOVERY.md`](docs/PASSIVE-CAN-DISCOVERY.md) — safe bitrate probe, evidence, and limits
 
 ## BLE commissioning
 

@@ -18,9 +18,9 @@
 #endif
 
 #ifdef CONFIG_VHOS_STATUS_SOFTAP_AUTOSTART
-#define VHOS_CAPABILITIES "[\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
+#define VHOS_CAPABILITIES "[\"capture.passive\",\"ota.ab\",\"ota.rollback-self-test\",\"status.softap.readonly\"]"
 #else
-#define VHOS_CAPABILITIES "[\"ota.ab\",\"ota.rollback-self-test\"]"
+#define VHOS_CAPABILITIES "[\"capture.passive\",\"ota.ab\",\"ota.rollback-self-test\"]"
 #endif
 
 static uint8_t rx_buffer[VHOS_MAX_FRAME_BYTES];
@@ -101,14 +101,14 @@ static esp_err_t send_handshake(void)
     int length = snprintf(
         payload,
         sizeof(payload),
-        "{\"active_config_id\":\"mrdiy-v13-passive-500k\","
-        "\"active_config_version\":\"0.1.0\","
+        "{\"active_config_id\":\"mrdiy-v13-passive-can-scan\","
+        "\"active_config_version\":\"0.2.0\","
         "\"bootloader_version\":\"esp-idf-5.5.3\","
         "\"capabilities\":%s,"
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.9\","
+        "\"firmware_version\":\"0.1.0-dev.10\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -130,6 +130,13 @@ esp_err_t vhos_transport_send_health(void)
     vhos_can_health_t health = {0};
     esp_err_t can_result = vhos_can_get_health(&health);
     uint64_t observed_us = (uint64_t)esp_timer_get_time();
+    const char *candidate = vhos_can_passive_candidate(&health);
+    char candidate_json[32];
+    if (candidate == NULL) {
+        strlcpy(candidate_json, "null", sizeof(candidate_json));
+    } else {
+        snprintf(candidate_json, sizeof(candidate_json), "\"%s\"", candidate);
+    }
 
     char payload[VHOS_MAX_PAYLOAD_BYTES + 1];
     int length = snprintf(
@@ -139,12 +146,20 @@ esp_err_t vhos_transport_send_health(void)
         "\"bus_off_count\":%llu,"
         "\"can_bitrate_bps\":%lu,"
         "\"can_controller_running\":%s,"
+        "\"can_extended_frames\":%llu,"
+        "\"can_frames_250k\":%llu,"
+        "\"can_frames_500k\":%llu,"
+        "\"can_passive_lock\":%s,"
+        "\"can_scan_cycles\":%lu,"
+        "\"can_scan_state\":\"%s\","
+        "\"can_standard_frames\":%llu,"
         "\"capture_active\":false,"
         "\"contract\":\"gateway.health\","
         "\"contract_version\":\"1.0.0\","
         "\"dropped_frames\":%llu,"
         "\"listen_only\":true,"
         "\"observed_at\":\"monotonic_us:%llu\","
+        "\"passive_can_candidate\":%s,"
         "\"received_frames\":%llu,"
         "\"storage_free_bytes\":null,"
         "\"supply_millivolts\":null,"
@@ -153,8 +168,16 @@ esp_err_t vhos_transport_send_health(void)
         (unsigned long long)health.bus_off_count,
         (unsigned long)health.bitrate_bps,
         (can_result == ESP_OK && health.controller_running) ? "true" : "false",
+        (unsigned long long)health.extended_frames,
+        (unsigned long long)health.frames_250k,
+        (unsigned long long)health.frames_500k,
+        health.passive_lock ? "true" : "false",
+        (unsigned long)health.scan_cycles,
+        vhos_can_scan_state_name(health.scan_state),
+        (unsigned long long)health.standard_frames,
         (unsigned long long)health.dropped_frames,
         (unsigned long long)observed_us,
+        candidate_json,
         (unsigned long long)health.received_frames
     );
     if (length < 0 || (size_t)length >= sizeof(payload)) {

@@ -14,6 +14,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [SoftAP security](SOFTAP-STATUS-SECURITY.md) | Threat model, authentication, credential lifecycle, attack-surface controls, and residual risks. |
 | [SoftAP operations and verification](SOFTAP-STATUS-OPERATIONS.md) | Connection procedure, physical test plan, failure diagnosis, acceptance evidence, and recovery. |
 | [BLE bond-loss recovery](BLE-BOND-LOSS-RECOVERY.md) | Persistent identity epochs, automatic recovery after NVS loss, failure behavior, and acceptance tests. |
+| [Passive CAN discovery](PASSIVE-CAN-DISCOVERY.md) | Bounded 500/250-kbit listen-only probing, lock evidence, safety boundaries, and vehicle acceptance. |
 
 ## Governing rule
 
@@ -43,3 +44,7 @@ transport security, but they must retain the read-only and no-arbitrary-transmit
 removes the gateway bond, that same erase removes the identity epoch and the next boot presents a
 new peripheral identity to iOS. This prevents an old iPhone bond from trapping commissioning in a
 connect, encryption-failure, disconnect loop.
+
+`v0.1.0-dev.10` adds a continuously bounded passive 500/250-kbit CAN probe. It can establish a
+vehicle-bus candidate but cannot confirm OBD-II, issue diagnostic requests, or transmit a CAN
+frame.

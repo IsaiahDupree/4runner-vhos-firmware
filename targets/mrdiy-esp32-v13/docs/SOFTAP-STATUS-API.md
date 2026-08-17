@@ -122,9 +122,17 @@ Connection-specific values are null when no active connection exists.
 | --- | --- | --- |
 | `controller_running` | boolean | TWAI status query succeeded for the installed controller. |
 | `listen_only` | boolean | Firmware-configured listen-only invariant. |
-| `bitrate_bps` | integer | Configured passive bitrate, currently 500000. |
-| `bus_detected` | boolean | Deterministic derivation: `received_frames > 0`. |
+| `bitrate_bps` | integer | Active passive bitrate, either 500000 or 250000. |
+| `scan_state` | string | `PROBING_500K`, `PROBING_250K`, `LOCKED_500K`, `LOCKED_250K`, or `ERROR`. |
+| `scan_cycles` | integer | Completed bitrate transitions since boot. |
+| `passive_lock` | boolean | True after the active window receives at least three valid CAN frames. |
+| `bus_detected` | boolean | Same deterministic value as `passive_lock`. |
+| `passive_can_candidate` | string or null | Identifier format and bitrate inferred from the locked passive window; null before lock. |
 | `received_frames` | integer | Cumulative frames accepted by the receive task. |
+| `standard_frames` | integer | Cumulative valid 11-bit frames. |
+| `extended_frames` | integer | Cumulative valid 29-bit frames. |
+| `frames_500k` | integer | Cumulative valid frames received during 500-kbit windows. |
+| `frames_250k` | integer | Cumulative valid frames received during 250-kbit windows. |
 | `dropped_frames` | integer | Controller missed plus overrun counters. |
 | `bus_error_count` | integer | ESP-IDF TWAI controller counter. |
 | `bus_off_count` | integer | Firmware-counted transitions into bus-off. |

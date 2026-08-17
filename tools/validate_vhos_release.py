@@ -161,6 +161,27 @@ def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
     return "passed:persistent-random-static-identity-epoch"
 
 
+def validate_passive_can_probe(source_dir: Path) -> str:
+    implementation_path = source_dir / "vhos_can.c"
+    require(implementation_path.is_file(), "passive CAN probe implementation is missing")
+    implementation = implementation_path.read_text(encoding="utf-8")
+    required_fragments = {
+        "500 kbit timing": "TWAI_TIMING_CONFIG_500KBITS()" in implementation,
+        "250 kbit timing": "TWAI_TIMING_CONFIG_250KBITS()" in implementation,
+        "bounded probe window": "VHOS_CAN_PROBE_WINDOW_MS 10000U" in implementation,
+        "multi-frame lock threshold": "VHOS_CAN_LOCK_MINIMUM_FRAMES 3U" in implementation,
+        "passive lock evidence": "PASSIVE_CAN_LOCK" in implementation,
+        "bitrate switch evidence": "PASSIVE_CAN_PROBE_SWITCH" in implementation,
+        "standard frame accounting": "message.extd" in implementation,
+        "explicit scan state": "VHOS_CAN_SCAN_PROBING_250K" in implementation,
+    }
+    for control, present in required_fragments.items():
+        require(present, f"passive CAN probe is missing required control: {control}")
+    require("TWAI_MODE_LISTEN_ONLY" in implementation, "passive CAN probe is not listen-only")
+    require("twai_transmit" not in implementation, "passive CAN probe contains a transmit path")
+    return "passed:500k-250k-listen-only-multiframe-lock"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--release", required=True)
@@ -225,6 +246,7 @@ def main() -> None:
     require(args.app.read_bytes()[0] == ESP_IMAGE_MAGIC, "application image has invalid magic")
 
     listen_only_check = "not_applicable"
+    passive_can_probe_check = "not_applicable"
     if args.listen_only_source_dir is not None:
         source_files = list(args.listen_only_source_dir.glob("*.c")) + list(
             args.listen_only_source_dir.glob("*.h")
@@ -234,6 +256,8 @@ def main() -> None:
         require("TWAI_MODE_LISTEN_ONLY" in source_text, "listen-only TWAI mode is not enforced")
         require("twai_transmit" not in source_text, "target contains a TWAI transmit path")
         listen_only_check = "passed"
+        if (args.listen_only_source_dir / "vhos_can.c").is_file():
+            passive_can_probe_check = validate_passive_can_probe(args.listen_only_source_dir)
 
     status_surface_check = "not_applicable"
     if args.status_source_dir is not None:
@@ -309,6 +333,7 @@ def main() -> None:
             "rollbackConfiguration": "passed",
             "applicationFitsBothSlots": "passed",
             "listenOnlyNoTransmitPath": listen_only_check,
+            "passiveCanBitrateProbe": passive_can_probe_check,
             "bleBondLossIdentityRecovery": ble_bond_loss_recovery_check,
             "authenticatedReadOnlyStatusSurface": status_surface_check,
             "physicalBackupFlashRollbackRestore": args.physical_recovery_status,

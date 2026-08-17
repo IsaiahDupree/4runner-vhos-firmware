@@ -407,8 +407,21 @@ static cJSON *create_status_json(void)
     cJSON_AddBoolToObject(bus, "controller_running", can.controller_running);
     cJSON_AddBoolToObject(bus, "listen_only", can.listen_only);
     cJSON_AddNumberToObject(bus, "bitrate_bps", can.bitrate_bps);
-    cJSON_AddBoolToObject(bus, "bus_detected", can.received_frames > 0);
+    cJSON_AddStringToObject(bus, "scan_state", vhos_can_scan_state_name(can.scan_state));
+    cJSON_AddNumberToObject(bus, "scan_cycles", can.scan_cycles);
+    cJSON_AddBoolToObject(bus, "passive_lock", can.passive_lock);
+    cJSON_AddBoolToObject(bus, "bus_detected", can.passive_lock);
     add_u64(bus, "received_frames", can.received_frames);
+    add_u64(bus, "standard_frames", can.standard_frames);
+    add_u64(bus, "extended_frames", can.extended_frames);
+    add_u64(bus, "frames_500k", can.frames_500k);
+    add_u64(bus, "frames_250k", can.frames_250k);
+    const char *passive_candidate = vhos_can_passive_candidate(&can);
+    if (passive_candidate == NULL) {
+        cJSON_AddNullToObject(bus, "passive_can_candidate");
+    } else {
+        cJSON_AddStringToObject(bus, "passive_can_candidate", passive_candidate);
+    }
     add_u64(bus, "dropped_frames", can.dropped_frames);
     add_u64(bus, "bus_error_count", can.bus_error_count);
     add_u64(bus, "bus_off_count", can.bus_off_count);
