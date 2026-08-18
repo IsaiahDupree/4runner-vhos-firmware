@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 #include "vhos_ble.h"
 #include "vhos_can.h"
@@ -39,6 +40,7 @@ static void confirm_running_image(esp_err_t capture_result)
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "VHOS_BOOT reset_reason=%d", (int)esp_reset_reason());
     esp_err_t result = nvs_flash_init();
     if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

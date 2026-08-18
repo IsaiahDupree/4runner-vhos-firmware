@@ -28,6 +28,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev28 capture-export recovery](FIELD-VALIDATION-2026-08-18-DEV28.md) | Dev27 stale-bond field recovery, reproduced bulk-transfer GATT stall, off-callback export worker architecture, and pre-dev29 acceptance boundary. |
 | [dev29 capture retention and fault acceptance](FIELD-VALIDATION-2026-08-18-DEV29.md) | Header-only rotation protection, exact build identity, strict reset/app-death matrix, failure found in CoreBluetooth restoration, and remaining vehicle/power/export gates. |
 | [dev30 passive J1979 evidence](FIELD-VALIDATION-2026-08-18-DEV30.md) | Passive Mode 01 response recognition, exact binary evidence contract, default-deny supported-PID request planner, build identity, and physical validation boundary. |
+| [dev31 live-capture/export isolation](FIELD-VALIDATION-2026-08-18-DEV31.md) | In-vehicle concurrent-export failure, firmware-enforced recorder quiescence, runtime-only health status, smaller export chunks, reset-reason evidence, exact artifact, and remaining field gates. |
 
 ## Governing rule
 
@@ -128,3 +129,10 @@ BLE application session. A fixed `0x7DF` supported-PID request planner is unit-b
 plan, deterministic PARKED, idle capture, and confirmed protocol predicates. The production image
 provides no caller or transmit executor, and TWAI remains listen-only, so active diagnostics remain
 unavailable until a separately reviewed safety milestone.
+
+`v0.1.0-dev.31` treats active recording and history export as mutually exclusive firmware states.
+Capture reads and manual rotation are rejected until logging is stopped and the writer is drained;
+the read path repeats that proof under the file lock. Periodic health uses an in-memory capture
+snapshot rather than performing SPIFFS work, stopped export uses 12-record chunks, and the
+handshake exposes the ESP-IDF reset reason. The matching iOS 0.3.5 client refreshes inventory only
+while recording is active. Physical in-vehicle acceptance remains pending.

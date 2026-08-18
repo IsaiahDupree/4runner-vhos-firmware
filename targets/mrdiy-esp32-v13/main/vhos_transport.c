@@ -4,6 +4,7 @@
 #include <string.h>
 #include "cJSON.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -27,7 +28,7 @@
 #define VHOS_MESSAGE_CAPTURE_LOG_CHUNK 13U
 #define VHOS_CAPTURE_LOG_REQUEST_BYTES 8U
 #define VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES 16U
-#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 24U
+#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 12U
 #define VHOS_CAPTURE_EXPORT_QUEUE_DEPTH 1U
 #define VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES 6144U
 #define VHOS_J1979_QUEUE_DEPTH 16U
@@ -189,17 +190,19 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.30\","
+        "\"firmware_version\":\"0.1.0-dev.31\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
         "\"ota_maximum_image_bytes\":%u,"
         "\"ota_upload_url\":\"http://192.168.4.1/api/v1/ota/image\","
-        "\"protocol_version\":\"1.0.0\"}",
+        "\"protocol_version\":\"1.0.0\","
+        "\"reset_reason\":%d}",
         VHOS_CAPABILITIES,
         VHOS_BUILD_ID,
         gateway_id_value,
-        VHOS_OTA_MAX_IMAGE_BYTES
+        VHOS_OTA_MAX_IMAGE_BYTES,
+        (int)esp_reset_reason()
     );
     if (length < 0 || (size_t)length >= sizeof(payload)) {
         return ESP_ERR_INVALID_SIZE;
@@ -235,7 +238,7 @@ static esp_err_t send_health(vhos_transport_emit_scope_t scope)
     uint64_t observed_us = (uint64_t)esp_timer_get_time();
     const char *candidate = vhos_can_passive_candidate(&health);
     vhos_capture_store_status_t capture = {0};
-    bool capture_available = vhos_capture_store_get_status(&capture) == ESP_OK;
+    bool capture_available = vhos_capture_store_get_runtime_status(&capture) == ESP_OK;
     char candidate_json[32];
     if (candidate == NULL) {
         strlcpy(candidate_json, "null", sizeof(candidate_json));
@@ -368,6 +371,7 @@ static esp_err_t send_capture_log_chunk(
                     VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY * VHOS_CAPTURE_RECORD_BYTES] = {0};
     size_t data_length = 0;
     uint32_t record_count = 0;
+    uint32_t capture_session_id = 0;
     bool end = false;
     esp_err_t result = vhos_capture_store_read_records(
         slot,
@@ -376,7 +380,8 @@ static esp_err_t send_capture_log_chunk(
         sizeof(payload) - VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES,
         &data_length,
         &record_count,
-        &end
+        &end,
+        &capture_session_id
     );
     if (result == ESP_ERR_NOT_FOUND) {
         result = ESP_OK;
@@ -385,8 +390,6 @@ static esp_err_t send_capture_log_chunk(
     if (result != ESP_OK) {
         return result;
     }
-    vhos_capture_store_status_t status = {0};
-    vhos_capture_store_get_status(&status);
     payload[0] = 1;
     payload[1] = slot;
     payload[2] = end ? 1 : 0;
@@ -395,9 +398,7 @@ static esp_err_t send_capture_log_chunk(
     write_u16_le(&payload[10], VHOS_CAPTURE_RECORD_BYTES);
     write_u32_le(
         &payload[12],
-        slot == VHOS_CAPTURE_SLOT_CURRENT
-            ? status.current_session_id
-            : status.previous_session_id
+        capture_session_id
     );
     if (session_lock == NULL ||
         xSemaphoreTake(session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
@@ -421,6 +422,15 @@ static esp_err_t send_capture_log_chunk(
 static esp_err_t queue_capture_log_chunk(uint8_t slot, uint32_t offset)
 {
     if (capture_export_queue == NULL || session_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!vhos_capture_store_export_ready()) {
+        ESP_LOGW(
+            TAG,
+            "CAPTURE_EXPORT_REJECT slot=%u offset=%lu reason=active-recorder-must-pause",
+            slot,
+            (unsigned long)offset
+        );
         return ESP_ERR_INVALID_STATE;
     }
     if (xSemaphoreTake(session_lock, pdMS_TO_TICKS(100)) != pdTRUE) {

@@ -29,6 +29,7 @@ typedef struct {
 } vhos_capture_store_status_t;
 
 esp_err_t vhos_capture_store_start(void);
+esp_err_t vhos_capture_store_get_runtime_status(vhos_capture_store_status_t *status);
 esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status);
 esp_err_t vhos_capture_store_read_records(
     uint8_t slot,
@@ -37,8 +38,10 @@ esp_err_t vhos_capture_store_read_records(
     size_t output_capacity,
     size_t *output_length,
     uint32_t *record_count,
-    bool *end_of_file
+    bool *end_of_file,
+    uint32_t *session_id
 );
 esp_err_t vhos_capture_store_rotate(void);
 esp_err_t vhos_capture_store_set_logging(bool enabled);
+bool vhos_capture_store_export_ready(void);
 uint32_t vhos_capture_store_current_session_id(void);

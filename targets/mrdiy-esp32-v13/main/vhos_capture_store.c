@@ -43,7 +43,12 @@ static portMUX_TYPE sample_lock = portMUX_INITIALIZER_UNLOCKED;
 static FILE *current_file;
 static bool mounted;
 static bool logging_enabled;
+static bool writer_active;
+static uint32_t producers_active;
+static uint32_t records_outstanding;
 static uint32_t current_session_id;
+static uint32_t cached_total_bytes;
+static uint32_t cached_free_bytes;
 static uint64_t observed_frames;
 static uint64_t sampled_frames;
 static uint64_t retained_records;
@@ -238,6 +243,9 @@ static void observe_can(const vhos_can_observation_t *observation, void *context
     portENTER_CRITICAL(&status_lock);
     observed_frames++;
     enabled = mounted && logging_enabled;
+    if (enabled && !observation->remote_request) {
+        producers_active++;
+    }
     portEXIT_CRITICAL(&status_lock);
     if (!enabled || observation->remote_request) {
         return;
@@ -260,6 +268,7 @@ static void observe_can(const vhos_can_observation_t *observation, void *context
         portEXIT_CRITICAL(&sample_lock);
         portENTER_CRITICAL(&status_lock);
         sample_suppressed_frames++;
+        producers_active--;
         portEXIT_CRITICAL(&status_lock);
         return;
     }
@@ -275,12 +284,17 @@ static void observe_can(const vhos_can_observation_t *observation, void *context
 
     portENTER_CRITICAL(&status_lock);
     sampled_frames++;
+    records_outstanding++;
     portEXIT_CRITICAL(&status_lock);
     if (xQueueSend(record_queue, observation, 0) != pdTRUE) {
         portENTER_CRITICAL(&status_lock);
         queue_dropped_records++;
+        records_outstanding--;
         portEXIT_CRITICAL(&status_lock);
     }
+    portENTER_CRITICAL(&status_lock);
+    producers_active--;
+    portEXIT_CRITICAL(&status_lock);
 }
 
 static void writer_task(void *context)
@@ -292,11 +306,16 @@ static void writer_task(void *context)
         if (xQueueReceive(record_queue, &observation, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        portENTER_CRITICAL(&status_lock);
+        writer_active = true;
+        portEXIT_CRITICAL(&status_lock);
         uint8_t record[VHOS_CAPTURE_RECORD_BYTES];
         encode_record(&observation, record);
         if (xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
             portENTER_CRITICAL(&status_lock);
             storage_write_failures++;
+            writer_active = false;
+            records_outstanding--;
             portEXIT_CRITICAL(&status_lock);
             continue;
         }
@@ -323,9 +342,14 @@ static void writer_task(void *context)
         portENTER_CRITICAL(&status_lock);
         if (wrote) {
             retained_records++;
+            if (cached_free_bytes >= VHOS_CAPTURE_RECORD_BYTES) {
+                cached_free_bytes -= VHOS_CAPTURE_RECORD_BYTES;
+            }
         } else {
             storage_write_failures++;
         }
+        writer_active = false;
+        records_outstanding--;
         portEXIT_CRITICAL(&status_lock);
     }
 }
@@ -361,6 +385,14 @@ esp_err_t vhos_capture_store_start(void)
     if (result != ESP_OK) {
         return result;
     }
+    size_t total = 0;
+    size_t used = 0;
+    if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
+        portENTER_CRITICAL(&status_lock);
+        cached_total_bytes = (uint32_t)total;
+        cached_free_bytes = total >= used ? (uint32_t)(total - used) : 0;
+        portEXIT_CRITICAL(&status_lock);
+    }
     result = vhos_can_register_observer(observe_can, NULL);
     if (result != ESP_OK) {
         return result;
@@ -379,7 +411,7 @@ esp_err_t vhos_capture_store_start(void)
     return ESP_OK;
 }
 
-esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status)
+esp_err_t vhos_capture_store_get_runtime_status(vhos_capture_store_status_t *status)
 {
     if (status == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -389,6 +421,8 @@ esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status)
     status->mounted = mounted;
     status->logging = logging_enabled;
     status->current_session_id = current_session_id;
+    status->total_bytes = cached_total_bytes;
+    status->free_bytes = cached_free_bytes;
     status->observed_frames = observed_frames;
     status->sampled_frames = sampled_frames;
     status->retained_records = retained_records;
@@ -399,10 +433,23 @@ esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status)
     if (!status->mounted) {
         return ESP_ERR_INVALID_STATE;
     }
+    return ESP_OK;
+}
+
+esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status)
+{
+    esp_err_t result = vhos_capture_store_get_runtime_status(status);
+    if (result != ESP_OK) {
+        return result;
+    }
     if (xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    if (current_file != NULL) {
+    bool logging;
+    portENTER_CRITICAL(&status_lock);
+    logging = logging_enabled;
+    portEXIT_CRITICAL(&status_lock);
+    if (!logging && current_file != NULL) {
         fflush(current_file);
     }
     status->current_bytes = file_size(VHOS_CAPTURE_CURRENT_PATH);
@@ -420,6 +467,10 @@ esp_err_t vhos_capture_store_get_status(vhos_capture_store_status_t *status)
     if (esp_spiffs_info("storage", &total, &used) == ESP_OK) {
         status->total_bytes = (uint32_t)total;
         status->free_bytes = total >= used ? (uint32_t)(total - used) : 0;
+        portENTER_CRITICAL(&status_lock);
+        cached_total_bytes = status->total_bytes;
+        cached_free_bytes = status->free_bytes;
+        portEXIT_CRITICAL(&status_lock);
     }
     return ESP_OK;
 }
@@ -431,31 +482,62 @@ esp_err_t vhos_capture_store_read_records(
     size_t output_capacity,
     size_t *output_length,
     uint32_t *record_count,
-    bool *end_of_file
+    bool *end_of_file,
+    uint32_t *session_id
 )
 {
     if (output == NULL || output_length == NULL || record_count == NULL ||
-        end_of_file == NULL || output_capacity < VHOS_CAPTURE_RECORD_BYTES ||
+        end_of_file == NULL || session_id == NULL ||
+        output_capacity < VHOS_CAPTURE_RECORD_BYTES ||
         (slot != VHOS_CAPTURE_SLOT_CURRENT && slot != VHOS_CAPTURE_SLOT_PREVIOUS)) {
         return ESP_ERR_INVALID_ARG;
     }
+    *output_length = 0;
+    *record_count = 0;
+    *end_of_file = false;
+    *session_id = 0;
     const char *path = slot == VHOS_CAPTURE_SLOT_CURRENT
         ? VHOS_CAPTURE_CURRENT_PATH
         : VHOS_CAPTURE_PREVIOUS_PATH;
     if (xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    if (slot == VHOS_CAPTURE_SLOT_CURRENT && current_file != NULL) {
-        fflush(current_file);
+    bool export_ready;
+    portENTER_CRITICAL(&status_lock);
+    export_ready = mounted && !logging_enabled && !writer_active &&
+                   producers_active == 0 && records_outstanding == 0;
+    portEXIT_CRITICAL(&status_lock);
+    if (!export_ready || uxQueueMessagesWaiting(record_queue) != 0) {
+        xSemaphoreGive(file_lock);
+        ESP_LOGW(
+            TAG,
+            "CAPTURE_READ_REJECTED slot=%u offset=%lu reason=recorder-not-quiescent",
+            slot,
+            (unsigned long)record_offset
+        );
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (slot == VHOS_CAPTURE_SLOT_CURRENT && current_file != NULL &&
+        fflush(current_file) != 0) {
+        xSemaphoreGive(file_lock);
+        return ESP_FAIL;
     }
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         xSemaphoreGive(file_lock);
-        *output_length = 0;
-        *record_count = 0;
         *end_of_file = true;
         return ESP_ERR_NOT_FOUND;
     }
+    uint8_t header[VHOS_CAPTURE_HEADER_BYTES];
+    size_t header_read = fread(header, 1, sizeof(header), file);
+    if (header_read != sizeof(header) || memcmp(header, "VHCL", 4) != 0 ||
+        header[4] != 1 || header[5] != VHOS_CAPTURE_RECORD_BYTES ||
+        read_u32_le(&header[28]) != crc32c(header, 28)) {
+        fclose(file);
+        xSemaphoreGive(file_lock);
+        return ESP_ERR_INVALID_CRC;
+    }
+    *session_id = read_u32_le(&header[8]);
     uint32_t bytes = file_size(path);
     uint32_t available_records = bytes >= VHOS_CAPTURE_HEADER_BYTES
         ? (bytes - VHOS_CAPTURE_HEADER_BYTES) / VHOS_CAPTURE_RECORD_BYTES
@@ -486,6 +568,15 @@ esp_err_t vhos_capture_store_rotate(void)
     if (!mounted || xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
         return ESP_ERR_INVALID_STATE;
     }
+    bool safe;
+    portENTER_CRITICAL(&status_lock);
+    safe = !logging_enabled && !writer_active &&
+           producers_active == 0 && records_outstanding == 0;
+    portEXIT_CRITICAL(&status_lock);
+    if (!safe || uxQueueMessagesWaiting(record_queue) != 0) {
+        xSemaphoreGive(file_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t result = rotate_locked();
     xSemaphoreGive(file_lock);
     return result;
@@ -493,20 +584,68 @@ esp_err_t vhos_capture_store_rotate(void)
 
 esp_err_t vhos_capture_store_set_logging(bool enabled)
 {
+    if (enabled) {
+        if (file_lock == NULL ||
+            xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+        portENTER_CRITICAL(&status_lock);
+        if (!mounted) {
+            portEXIT_CRITICAL(&status_lock);
+            xSemaphoreGive(file_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
+        logging_enabled = true;
+        portEXIT_CRITICAL(&status_lock);
+        portENTER_CRITICAL(&sample_lock);
+        memset(sample_buckets, 0, sizeof(sample_buckets));
+        portEXIT_CRITICAL(&sample_lock);
+        xSemaphoreGive(file_lock);
+        ESP_LOGI(TAG, "CAPTURE_RESUMED");
+        return ESP_OK;
+    }
+
     portENTER_CRITICAL(&status_lock);
     if (!mounted) {
         portEXIT_CRITICAL(&status_lock);
         return ESP_ERR_INVALID_STATE;
     }
-    logging_enabled = enabled;
+    logging_enabled = false;
     portEXIT_CRITICAL(&status_lock);
-    if (!enabled && xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) == pdTRUE) {
-        if (current_file != NULL) {
-            fflush(current_file);
+    int64_t deadline_us = esp_timer_get_time() + 2000000LL;
+    while (esp_timer_get_time() < deadline_us) {
+        bool active;
+        portENTER_CRITICAL(&status_lock);
+        active = writer_active || producers_active != 0 || records_outstanding != 0;
+        portEXIT_CRITICAL(&status_lock);
+        if (!active && uxQueueMessagesWaiting(record_queue) == 0) {
+            break;
         }
-        xSemaphoreGive(file_lock);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-    return ESP_OK;
+    if (!vhos_capture_store_export_ready()) {
+        ESP_LOGE(TAG, "CAPTURE_PAUSE_TIMEOUT reason=writer-not-quiescent");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (xSemaphoreTake(file_lock, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t result = current_file == NULL || fflush(current_file) == 0
+        ? ESP_OK
+        : ESP_FAIL;
+    xSemaphoreGive(file_lock);
+    ESP_LOGI(TAG, "CAPTURE_PAUSED result=%s", esp_err_to_name(result));
+    return result;
+}
+
+bool vhos_capture_store_export_ready(void)
+{
+    bool ready;
+    portENTER_CRITICAL(&status_lock);
+    ready = mounted && !logging_enabled && !writer_active &&
+            producers_active == 0 && records_outstanding == 0;
+    portEXIT_CRITICAL(&status_lock);
+    return ready && record_queue != NULL && uxQueueMessagesWaiting(record_queue) == 0;
 }
 
 uint32_t vhos_capture_store_current_session_id(void)

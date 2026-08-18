@@ -122,6 +122,14 @@ the request itself. A fixed functional-request planner exists for the future sig
 deterministic-PARKED path, but has no production executor or permissive caller. See
 [dev30 passive J1979 evidence](docs/FIELD-VALIDATION-2026-08-18-DEV30.md).
 
+Firmware `v0.1.0-dev.31` closes the unsafe concurrency exposed by a real nonempty vehicle capture:
+history reads and manual rotation are denied until the recorder is paused, its writer has drained,
+and the file lock proves a quiescent snapshot. Periodic health no longer performs SPIFFS refresh
+work, stopped export uses smaller 12-record chunks, and the handshake reports the reset reason for
+phone-side failure attribution. The paired iOS 0.3.5 build inventories active recordings without
+bulk downloading them. See
+[dev31 live-capture/export isolation](docs/FIELD-VALIDATION-2026-08-18-DEV31.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
