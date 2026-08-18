@@ -24,7 +24,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "vhos_transport.h"
 
-#define VHOS_BLE_TX_MAX_BYTES 1100U
+#define VHOS_BLE_TX_MAX_BYTES 1600U
 #define VHOS_BLE_FRAME_HEADER_BYTES 36U
 #define VHOS_BLE_FRAME_MESSAGE_HANDSHAKE 1U
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
@@ -1827,14 +1827,14 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
     if (xTaskCreate(
             health_task,
             "vhos_health",
-            6144,
+            8192,
             NULL,
             5,
             &health_task_handle
         ) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    if (xTaskCreate(tx_task, "vhos_ble_tx", 4096, NULL, 6, NULL) != pdPASS) {
+    if (xTaskCreate(tx_task, "vhos_ble_tx", 6144, NULL, 6, NULL) != pdPASS) {
         vTaskDelete(health_task_handle);
         health_task_handle = NULL;
         return ESP_ERR_NO_MEM;

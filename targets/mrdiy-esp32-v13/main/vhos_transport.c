@@ -16,7 +16,7 @@
 #include "vhos_ota_wifi.h"
 
 #define VHOS_HEADER_BYTES 36U
-#define VHOS_MAX_PAYLOAD_BYTES 1024U
+#define VHOS_MAX_PAYLOAD_BYTES 1536U
 #define VHOS_MAX_FRAME_BYTES (VHOS_HEADER_BYTES + VHOS_MAX_PAYLOAD_BYTES)
 #define VHOS_MESSAGE_HANDSHAKE 1U
 #define VHOS_MESSAGE_RAW_CAN_FRAME 2U
@@ -34,6 +34,9 @@
 #define VHOS_J1979_QUEUE_DEPTH 16U
 #define VHOS_J1979_TASK_STACK_BYTES 4096U
 #define VHOS_LIVE_CAN_INTERVAL_US 500000ULL
+#define VHOS_CAPTURE_PAUSE_REASON_NONE 0U
+#define VHOS_CAPTURE_PAUSE_REASON_OTA 1U
+#define VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER 2U
 
 #ifndef VHOS_BUILD_ID
 #define VHOS_BUILD_ID "source-tree"
@@ -75,6 +78,7 @@ static uint32_t session_generation;
 static portMUX_TYPE live_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t last_live_can_us;
 static uint64_t j1979_queue_drops;
+static uint8_t capture_pause_reason;
 
 static uint32_t read_u32_le(const uint8_t *bytes)
 {
@@ -190,7 +194,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.31\","
+        "\"firmware_version\":\"0.1.0-dev.32\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -261,9 +265,20 @@ static esp_err_t send_health(vhos_transport_emit_scope_t scope)
         "\"can_scan_cycles\":%lu,"
         "\"can_scan_state\":\"%s\","
         "\"can_standard_frames\":%llu,"
+        "\"can_observer_queue_capacity\":%lu,"
+        "\"can_observer_queue_depth\":%lu,"
+        "\"can_observer_queue_dropped_frames\":%llu,"
+        "\"can_observer_queue_high_water\":%lu,"
+        "\"can_twai_receive_missed_frames\":%llu,"
+        "\"can_twai_receive_overrun_frames\":%llu,"
+        "\"can_twai_receive_queue_capacity\":%lu,"
+        "\"can_twai_receive_queue_depth\":%lu,"
         "\"capture_active\":%s,"
+        "\"capture_observed_frames\":%llu,"
         "\"capture_queue_dropped_records\":%llu,"
         "\"capture_retained_records\":%llu,"
+        "\"capture_sample_suppressed_frames\":%llu,"
+        "\"capture_sampled_frames\":%llu,"
         "\"capture_session_id\":%lu,"
         "\"capture_storage_write_failures\":%llu,"
         "\"contract\":\"gateway.health\","
@@ -287,9 +302,20 @@ static esp_err_t send_health(vhos_transport_emit_scope_t scope)
         (unsigned long)health.scan_cycles,
         vhos_can_scan_state_name(health.scan_state),
         (unsigned long long)health.standard_frames,
+        (unsigned long)health.observer_queue_capacity,
+        (unsigned long)health.observer_queue_depth,
+        (unsigned long long)health.observer_queue_dropped_frames,
+        (unsigned long)health.observer_queue_high_water,
+        (unsigned long long)health.twai_receive_missed_frames,
+        (unsigned long long)health.twai_receive_overrun_frames,
+        (unsigned long)health.twai_receive_queue_capacity,
+        (unsigned long)health.twai_receive_queue_depth,
         capture_available && capture.logging ? "true" : "false",
+        (unsigned long long)capture.observed_frames,
         (unsigned long long)capture.queue_dropped_records,
         (unsigned long long)capture.retained_records,
+        (unsigned long long)capture.sample_suppressed_frames,
+        (unsigned long long)capture.sampled_frames,
         (unsigned long)capture.current_session_id,
         (unsigned long long)capture.storage_write_failures,
         (unsigned long long)health.dropped_frames,
@@ -766,6 +792,11 @@ static esp_err_t process_frame(
         }
         if (operation == 3 || operation == 4) {
             esp_err_t result = vhos_capture_store_set_logging(operation == 4);
+            if (result == ESP_OK) {
+                capture_pause_reason = operation == 4
+                    ? VHOS_CAPTURE_PAUSE_REASON_NONE
+                    : payload[2];
+            }
             return result == ESP_OK ? send_capture_log_index() : result;
         }
         return ESP_ERR_NOT_SUPPORTED;
@@ -851,6 +882,17 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
 
 void vhos_transport_reset(void)
 {
+    if (capture_pause_reason == VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER) {
+        esp_err_t resume_result = vhos_capture_store_set_logging(true);
+        ESP_LOGW(
+            TAG,
+            "CAPTURE_TRANSFER_SESSION_RESET action=resume-recorder result=%s",
+            esp_err_to_name(resume_result)
+        );
+        if (resume_result == ESP_OK) {
+            capture_pause_reason = VHOS_CAPTURE_PAUSE_REASON_NONE;
+        }
+    }
     if (session_lock != NULL && xSemaphoreTake(session_lock, portMAX_DELAY) == pdTRUE) {
         session_generation++;
         rx_length = 0;

@@ -23,6 +23,14 @@ typedef struct {
     uint64_t frames_250k;
     uint64_t candidate_standard_frames;
     uint64_t candidate_extended_frames;
+    uint64_t twai_receive_missed_frames;
+    uint64_t twai_receive_overrun_frames;
+    uint64_t observer_queue_dropped_frames;
+    uint32_t twai_receive_queue_depth;
+    uint32_t twai_receive_queue_capacity;
+    uint32_t observer_queue_depth;
+    uint32_t observer_queue_high_water;
+    uint32_t observer_queue_capacity;
     uint32_t scan_cycles;
     bool listen_only;
     bool controller_running;

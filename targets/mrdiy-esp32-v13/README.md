@@ -130,6 +130,15 @@ phone-side failure attribution. The paired iOS 0.3.5 build inventories active re
 bulk downloading them. See
 [dev31 live-capture/export isolation](docs/FIELD-VALIDATION-2026-08-18-DEV31.md).
 
+Firmware `v0.1.0-dev.32` separates controller receive, observer fan-out, and flash-retention
+quality. A priority-12 task drains a 512-entry TWAI queue in bounded batches and hands complete
+timestamped observations to a separate 256-entry queue. Capture sampling, passive J1979 parsing,
+and live BLE display run on the lower-priority dispatch task rather than in the critical receive
+loop. Health now reports TWAI missed/overrun counts, both queue depths and capacities, observer
+high-water/drop counts, and the existing recorder sampling/storage counters independently. A
+history-transfer pause is flushed and automatically resumed if the BLE session ends. See
+[dev32 acquisition-quality foundation](docs/FIELD-VALIDATION-2026-08-18-DEV32.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it

@@ -29,6 +29,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev29 capture retention and fault acceptance](FIELD-VALIDATION-2026-08-18-DEV29.md) | Header-only rotation protection, exact build identity, strict reset/app-death matrix, failure found in CoreBluetooth restoration, and remaining vehicle/power/export gates. |
 | [dev30 passive J1979 evidence](FIELD-VALIDATION-2026-08-18-DEV30.md) | Passive Mode 01 response recognition, exact binary evidence contract, default-deny supported-PID request planner, build identity, and physical validation boundary. |
 | [dev31 live-capture/export isolation](FIELD-VALIDATION-2026-08-18-DEV31.md) | In-vehicle concurrent-export failure, firmware-enforced recorder quiescence, runtime-only health status, smaller export chunks, reset-reason evidence, exact artifact, and remaining field gates. |
+| [dev32 acquisition-quality foundation](FIELD-VALIDATION-2026-08-18-DEV32.md) | Dev31 vehicle baseline, two-stage receive pipeline, loss attribution contract, history-transfer recovery, exact unsigned artifact, and physical acceptance gates. |
 
 ## Governing rule
 
@@ -136,3 +137,11 @@ the read path repeats that proof under the file lock. Periodic health uses an in
 snapshot rather than performing SPIFFS work, stopped export uses 12-record chunks, and the
 handshake exposes the ESP-IDF reset reason. The matching iOS 0.3.5 client refreshes inventory only
 while recording is active. Physical in-vehicle acceptance remains pending.
+
+`v0.1.0-dev.32` gives every acquisition loss a distinct owner. The high-priority receive task
+drains a larger TWAI queue in bounded batches, while a lower-priority task dispatches immutable
+observations to the capture, passive-J1979, and live-display consumers. Health reports controller
+missed frames, hardware overruns, driver-queue pressure, observer-queue pressure/drops, and
+retention-policy sampling/storage outcomes independently. Stopping the recorder for an approved
+history transfer records a reason; an interrupted BLE session automatically resumes recording,
+whereas an OTA pause remains paused by policy. Physical vehicle acceptance remains pending.

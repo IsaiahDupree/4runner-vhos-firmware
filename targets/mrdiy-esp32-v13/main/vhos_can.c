@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
@@ -17,6 +18,21 @@
 #define VHOS_CAN_LOCK_MINIMUM_FRAMES 3U
 #define VHOS_CAN_RECEIVE_POLL_MS 250U
 #define VHOS_CAN_MAX_OBSERVERS 3U
+#define VHOS_CAN_TWAI_RX_QUEUE_DEPTH 512U
+#define VHOS_CAN_OBSERVATION_QUEUE_DEPTH 256U
+#define VHOS_CAN_RX_BATCH_LIMIT 64U
+#define VHOS_CAN_RX_TASK_STACK_BYTES 3072U
+#define VHOS_CAN_DISPATCH_TASK_STACK_BYTES 4096U
+#define VHOS_CAN_RX_TASK_PRIORITY 12U
+#define VHOS_CAN_DISPATCH_TASK_PRIORITY 9U
+
+#if CONFIG_FREERTOS_UNICORE
+#define VHOS_CAN_RX_TASK_CORE tskNO_AFFINITY
+#define VHOS_CAN_DISPATCH_TASK_CORE tskNO_AFFINITY
+#else
+#define VHOS_CAN_RX_TASK_CORE 1
+#define VHOS_CAN_DISPATCH_TASK_CORE 0
+#endif
 
 typedef struct {
     vhos_can_observer_fn function;
@@ -32,7 +48,10 @@ static uint64_t frames_500k;
 static uint64_t frames_250k;
 static uint64_t candidate_standard_frames;
 static uint64_t candidate_extended_frames;
-static uint64_t completed_dropped_frames;
+static uint64_t completed_twai_missed_frames;
+static uint64_t completed_twai_overrun_frames;
+static uint64_t observer_queue_dropped_frames;
+static uint32_t observer_queue_high_water;
 static uint64_t completed_bus_error_count;
 static uint64_t bus_off_count;
 static bool bus_off_observed;
@@ -42,11 +61,36 @@ static uint32_t current_bitrate_bps = VHOS_CAN_BITRATE_500K_BPS;
 static uint32_t scan_cycles;
 static vhos_can_scan_state_t scan_state = VHOS_CAN_SCAN_PROBING_500K;
 static SemaphoreHandle_t controller_lock;
+static QueueHandle_t observation_queue;
 static portMUX_TYPE observer_lock = portMUX_INITIALIZER_UNLOCKED;
 static vhos_can_observer_t observers[VHOS_CAN_MAX_OBSERVERS];
 static uint64_t source_sequence;
 
-static void publish_observation(const twai_message_t *message, uint32_t bitrate_bps)
+static void dispatch_observation(const vhos_can_observation_t *observation)
+{
+    vhos_can_observer_t snapshot[VHOS_CAN_MAX_OBSERVERS];
+    portENTER_CRITICAL(&observer_lock);
+    memcpy(snapshot, observers, sizeof(snapshot));
+    portEXIT_CRITICAL(&observer_lock);
+    for (size_t index = 0; index < VHOS_CAN_MAX_OBSERVERS; index++) {
+        if (snapshot[index].function != NULL) {
+            snapshot[index].function(observation, snapshot[index].context);
+        }
+    }
+}
+
+static void observation_dispatch_task(void *argument)
+{
+    (void)argument;
+    vhos_can_observation_t observation = {0};
+    while (true) {
+        if (xQueueReceive(observation_queue, &observation, portMAX_DELAY) == pdTRUE) {
+            dispatch_observation(&observation);
+        }
+    }
+}
+
+static void enqueue_observation(const twai_message_t *message, uint32_t bitrate_bps)
 {
     vhos_can_observation_t observation = {
         .source_sequence = ++source_sequence,
@@ -60,15 +104,19 @@ static void publish_observation(const twai_message_t *message, uint32_t bitrate_
     };
     memcpy(observation.data, message->data, observation.data_length);
 
-    vhos_can_observer_t snapshot[VHOS_CAN_MAX_OBSERVERS];
-    portENTER_CRITICAL(&observer_lock);
-    memcpy(snapshot, observers, sizeof(snapshot));
-    portEXIT_CRITICAL(&observer_lock);
-    for (size_t index = 0; index < VHOS_CAN_MAX_OBSERVERS; index++) {
-        if (snapshot[index].function != NULL) {
-            snapshot[index].function(&observation, snapshot[index].context);
-        }
+    if (observation_queue == NULL ||
+        xQueueSend(observation_queue, &observation, 0) != pdTRUE) {
+        portENTER_CRITICAL(&metrics_lock);
+        observer_queue_dropped_frames++;
+        portEXIT_CRITICAL(&metrics_lock);
+        return;
     }
+    UBaseType_t depth = uxQueueMessagesWaiting(observation_queue);
+    portENTER_CRITICAL(&metrics_lock);
+    if (depth > observer_queue_high_water) {
+        observer_queue_high_water = (uint32_t)depth;
+    }
+    portEXIT_CRITICAL(&metrics_lock);
 }
 
 static twai_timing_config_t timing_for_bitrate(uint32_t bitrate_bps)
@@ -87,7 +135,7 @@ static esp_err_t install_controller(uint32_t bitrate_bps)
         TWAI_MODE_LISTEN_ONLY
     );
     general.tx_queue_len = 0;
-    general.rx_queue_len = 128;
+    general.rx_queue_len = VHOS_CAN_TWAI_RX_QUEUE_DEPTH;
     general.alerts_enabled = TWAI_ALERT_BUS_OFF | TWAI_ALERT_BUS_ERROR |
                              TWAI_ALERT_RX_QUEUE_FULL;
 
@@ -131,7 +179,8 @@ static void accumulate_controller_status(void)
         return;
     }
     portENTER_CRITICAL(&metrics_lock);
-    completed_dropped_frames += (uint64_t)status.rx_missed_count + status.rx_overrun_count;
+    completed_twai_missed_frames += status.rx_missed_count;
+    completed_twai_overrun_frames += status.rx_overrun_count;
     completed_bus_error_count += status.bus_error_count;
     bool bus_off_now = status.state == TWAI_STATE_BUS_OFF;
     if (bus_off_now && !bus_off_observed) {
@@ -207,6 +256,26 @@ static void lock_probe(
     );
 }
 
+static void record_received_message(const twai_message_t *message)
+{
+    uint32_t observation_bitrate;
+    portENTER_CRITICAL(&metrics_lock);
+    received_frames++;
+    if (message->extd) {
+        extended_frames++;
+    } else {
+        standard_frames++;
+    }
+    if (current_bitrate_bps == VHOS_CAN_BITRATE_500K_BPS) {
+        frames_500k++;
+    } else {
+        frames_250k++;
+    }
+    observation_bitrate = current_bitrate_bps;
+    portEXIT_CRITICAL(&metrics_lock);
+    enqueue_observation(message, observation_bitrate);
+}
+
 static void receive_task(void *argument)
 {
     (void)argument;
@@ -217,22 +286,12 @@ static void receive_task(void *argument)
     TickType_t phase_started = xTaskGetTickCount();
     while (true) {
         if (twai_receive(&message, pdMS_TO_TICKS(VHOS_CAN_RECEIVE_POLL_MS)) == ESP_OK) {
-            uint32_t observation_bitrate;
-            portENTER_CRITICAL(&metrics_lock);
-            received_frames++;
-            if (message.extd) {
-                extended_frames++;
-            } else {
-                standard_frames++;
-            }
-            if (current_bitrate_bps == VHOS_CAN_BITRATE_500K_BPS) {
-                frames_500k++;
-            } else {
-                frames_250k++;
-            }
-            observation_bitrate = current_bitrate_bps;
-            portEXIT_CRITICAL(&metrics_lock);
-            publish_observation(&message, observation_bitrate);
+            uint32_t batch_count = 0;
+            do {
+                record_received_message(&message);
+                batch_count++;
+            } while (batch_count < VHOS_CAN_RX_BATCH_LIMIT &&
+                     twai_receive(&message, 0) == ESP_OK);
         }
 
         uint64_t total_frames;
@@ -323,19 +382,48 @@ esp_err_t vhos_can_start(void)
     if (controller_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    observation_queue = xQueueCreate(
+        VHOS_CAN_OBSERVATION_QUEUE_DEPTH,
+        sizeof(vhos_can_observation_t)
+    );
+    if (observation_queue == NULL) {
+        vSemaphoreDelete(controller_lock);
+        controller_lock = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     esp_err_t result = install_controller(VHOS_CAN_BITRATE_500K_BPS);
     if (result != ESP_OK) {
+        vQueueDelete(observation_queue);
+        observation_queue = NULL;
+        vSemaphoreDelete(controller_lock);
+        controller_lock = NULL;
         return result;
     }
-    BaseType_t task_result = xTaskCreate(
+    TaskHandle_t dispatch_task_handle = NULL;
+    BaseType_t task_result = xTaskCreatePinnedToCore(
+        observation_dispatch_task,
+        "vhos_can_dispatch",
+        VHOS_CAN_DISPATCH_TASK_STACK_BYTES,
+        NULL,
+        VHOS_CAN_DISPATCH_TASK_PRIORITY,
+        &dispatch_task_handle,
+        VHOS_CAN_DISPATCH_TASK_CORE
+    );
+    if (task_result == pdPASS) {
+        task_result = xTaskCreatePinnedToCore(
         receive_task,
         "vhos_can_rx",
-        3072,
+        VHOS_CAN_RX_TASK_STACK_BYTES,
         NULL,
-        8,
-        NULL
-    );
+        VHOS_CAN_RX_TASK_PRIORITY,
+        NULL,
+        VHOS_CAN_RX_TASK_CORE
+        );
+    }
     if (task_result != pdPASS) {
+        if (dispatch_task_handle != NULL) {
+            vTaskDelete(dispatch_task_handle);
+        }
         xSemaphoreTake(controller_lock, portMAX_DELAY);
         portENTER_CRITICAL(&metrics_lock);
         controller_running = false;
@@ -344,15 +432,23 @@ esp_err_t vhos_can_start(void)
         twai_stop();
         twai_driver_uninstall();
         xSemaphoreGive(controller_lock);
+        vQueueDelete(observation_queue);
+        observation_queue = NULL;
+        vSemaphoreDelete(controller_lock);
+        controller_lock = NULL;
         return ESP_ERR_NO_MEM;
     }
 
     ESP_LOGI(
         TAG,
-        "PASSIVE_CAN_READY mode=listen-only initial_bitrate=%u probe_window_ms=%u lock_minimum_frames=%u rx_gpio=%d tx_gpio=%d",
+        "PASSIVE_CAN_READY mode=listen-only initial_bitrate=%u probe_window_ms=%u lock_minimum_frames=%u twai_rx_queue=%u observer_queue=%u rx_priority=%u dispatch_priority=%u rx_gpio=%d tx_gpio=%d",
         VHOS_CAN_BITRATE_500K_BPS,
         VHOS_CAN_PROBE_WINDOW_MS,
         VHOS_CAN_LOCK_MINIMUM_FRAMES,
+        VHOS_CAN_TWAI_RX_QUEUE_DEPTH,
+        VHOS_CAN_OBSERVATION_QUEUE_DEPTH,
+        VHOS_CAN_RX_TASK_PRIORITY,
+        VHOS_CAN_DISPATCH_TASK_PRIORITY,
         VHOS_CAN_RX_GPIO,
         VHOS_CAN_TX_GPIO
     );
@@ -376,6 +472,9 @@ esp_err_t vhos_can_get_health(vhos_can_health_t *health)
     portEXIT_CRITICAL(&metrics_lock);
     twai_status_info_t status = {0};
     esp_err_t result = running ? twai_get_status_info(&status) : ESP_ERR_INVALID_STATE;
+    UBaseType_t observer_depth = observation_queue == NULL
+        ? 0
+        : uxQueueMessagesWaiting(observation_queue);
 
     portENTER_CRITICAL(&metrics_lock);
     health->received_frames = received_frames;
@@ -385,6 +484,11 @@ esp_err_t vhos_can_get_health(vhos_can_health_t *health)
     health->frames_250k = frames_250k;
     health->candidate_standard_frames = candidate_standard_frames;
     health->candidate_extended_frames = candidate_extended_frames;
+    health->observer_queue_dropped_frames = observer_queue_dropped_frames;
+    health->observer_queue_depth = (uint32_t)observer_depth;
+    health->observer_queue_high_water = observer_queue_high_water;
+    health->observer_queue_capacity = VHOS_CAN_OBSERVATION_QUEUE_DEPTH;
+    health->twai_receive_queue_capacity = VHOS_CAN_TWAI_RX_QUEUE_DEPTH;
     health->scan_cycles = scan_cycles;
     if (result == ESP_OK) {
         bool bus_off_now = status.state == TWAI_STATE_BUS_OFF;
@@ -392,14 +496,22 @@ esp_err_t vhos_can_get_health(vhos_can_health_t *health)
             bus_off_count++;
         }
         bus_off_observed = bus_off_now;
-        health->dropped_frames = completed_dropped_frames +
-                                 (uint64_t)status.rx_missed_count + status.rx_overrun_count;
+        health->twai_receive_missed_frames = completed_twai_missed_frames +
+                                             status.rx_missed_count;
+        health->twai_receive_overrun_frames = completed_twai_overrun_frames +
+                                              status.rx_overrun_count;
+        health->twai_receive_queue_depth = status.msgs_to_rx;
         health->bus_error_count = completed_bus_error_count + status.bus_error_count;
     } else {
         bus_off_observed = false;
-        health->dropped_frames = completed_dropped_frames;
+        health->twai_receive_missed_frames = completed_twai_missed_frames;
+        health->twai_receive_overrun_frames = completed_twai_overrun_frames;
+        health->twai_receive_queue_depth = 0;
         health->bus_error_count = completed_bus_error_count;
     }
+    health->dropped_frames = health->twai_receive_missed_frames +
+                             health->twai_receive_overrun_frames +
+                             health->observer_queue_dropped_frames;
     health->bus_off_count = bus_off_count;
     health->controller_running = controller_running && result == ESP_OK;
     health->passive_lock = passive_lock;
