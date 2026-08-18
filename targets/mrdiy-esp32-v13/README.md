@@ -93,6 +93,23 @@ chip-id hard reset—without Pair, Forget, or NVS erase. Zero CAN frames are exp
 bench gateway was not attached to the vehicle.
 See [dev26 deferred-control validation](docs/FIELD-VALIDATION-2026-08-17-DEV26.md).
 
+Firmware `v0.1.0-dev.27` adds an explicit paired-once bond-policy epoch. If a gateway that was
+previously paired later boots with an empty NimBLE key database while iOS retains the old key, it
+rotates its random-static identity once and allows a fresh secure bond without requiring the owner
+to use **Forget This Device**.
+
+Firmware `v0.1.0-dev.28` moves capture reads out of the NimBLE GATT callback. A depth-one queue and
+dedicated 6 KiB worker perform SPIFFS access, and each request carries a transport generation so a
+late result cannot cross a disconnect. See
+[dev28 capture-export recovery](docs/FIELD-VALIDATION-2026-08-18-DEV28.md).
+
+Firmware `v0.1.0-dev.29` prevents an empty/header-only current capture from replacing a nonempty
+previous segment at boot. The exact dev29 build, paired with iOS `0.3.3 (9)`, passed a strict matrix
+of three ESP execution losses and three connected app-process deaths; every cycle established a
+new physical link, exact dev29 handshake, and live health without Pair, Forget, NVS erase, or manual
+Connect. See
+[dev29 capture retention and fault acceptance](docs/FIELD-VALIDATION-2026-08-18-DEV29.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it

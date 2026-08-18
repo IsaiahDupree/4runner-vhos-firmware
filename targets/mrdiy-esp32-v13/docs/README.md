@@ -25,6 +25,8 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev24 transport and GATT review closure](FIELD-VALIDATION-2026-08-17-DEV24.md) | Complete-frame session gating, strict handshake request validation, epoch-2/epoch-6 GATT compatibility audit, bond-preserving migration, exact build hash, and remaining physical gates. |
 | [dev25 delivery-gate validation](FIELD-VALIDATION-2026-08-17-DEV25.md) | Bootstrap-only pre-session output, admission and delivery authorization, host-epoch RX/TX clearing, exact unsigned build identity, and remaining physical gates. |
 | [dev26 deferred-control validation and physical acceptance](FIELD-VALIDATION-2026-08-17-DEV26.md) | Dev25 TX-stack failure, deferred initial health/status, exact build identity, saved-bond commissioning, sustained health, and automatic hard-reset recovery. |
+| [dev28 capture-export recovery](FIELD-VALIDATION-2026-08-18-DEV28.md) | Dev27 stale-bond field recovery, reproduced bulk-transfer GATT stall, off-callback export worker architecture, and pre-dev29 acceptance boundary. |
+| [dev29 capture retention and fault acceptance](FIELD-VALIDATION-2026-08-18-DEV29.md) | Header-only rotation protection, exact build identity, strict reset/app-death matrix, failure found in CoreBluetooth restoration, and remaining vehicle/power/export gates. |
 
 ## Governing rule
 
@@ -102,3 +104,17 @@ unchanged. Physical USB-bench acceptance reused the saved bond, sustained recurr
 more than two minutes, and automatically reconnected and verified dev26 after a deliberate Mac
 chip-id hard reset, with no Pair/Forget/NVS erase. CAN remained at the expected zero-frame state
 because the bench gateway was not connected to the vehicle.
+
+`v0.1.0-dev.27` records a paired-once bond-policy epoch. If the gateway later has an empty NimBLE
+key database while iOS still remembers the prior key, the firmware rotates its persisted BLE
+identity once and establishes a new secure bond without asking the owner to use Settings.
+
+`v0.1.0-dev.28` moves capture-file reads out of the NimBLE GATT callback into a depth-one,
+generation-bound worker queue. Filesystem latency can no longer own the host event thread, and a
+disconnect invalidates both queued requests and late results.
+
+`v0.1.0-dev.29` preserves a nonempty previous capture when the current boot has no complete CAN
+record. Its paired iOS `0.3.3 (9)` build and the exact dev29 firmware passed baseline plus three ESP
+execution losses and three connected app-process deaths, with a new physical link, exact handshake,
+and live health after every fault. Electrical rail loss and nonempty interrupted capture transfer
+remain unclaimed physical gates.

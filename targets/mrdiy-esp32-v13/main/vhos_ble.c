@@ -4,6 +4,7 @@
 #include <string.h>
 #include "esp_bt.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -39,6 +40,10 @@
 #define VHOS_BLE_GATT_SCHEMA_KEY "gatt_schema"
 #define VHOS_BLE_GATT_SCHEMA_VERSION 6U
 #define VHOS_BLE_GATT_SCHEMA_BOND_COMPATIBLE_VERSION 2U
+#define VHOS_BLE_BOND_POLICY_KEY "bond_policy"
+#define VHOS_BLE_BONDED_ONCE_KEY "paired_once"
+#define VHOS_BLE_ROTATE_PENDING_KEY "rotate_pending"
+#define VHOS_BLE_BOND_POLICY_VERSION 1U
 
 typedef struct {
     size_t length;
@@ -78,6 +83,7 @@ static TaskHandle_t health_task_handle;
 static struct ble_npl_callout advertising_retry_callout;
 static struct ble_npl_callout security_start_callout;
 static uint32_t security_start_epoch;
+static bool identity_recovery_restart_scheduled;
 
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(
     0x23, 0xf1, 0xb3, 0x12, 0x8f, 0xa1, 0xfa, 0x83,
@@ -238,6 +244,18 @@ static const char *passkey_action_name(uint8_t action)
     }
 }
 
+static bool read_bond_store_counts(int *our_records, int *peer_records)
+{
+    if (our_records == NULL || peer_records == NULL) {
+        return false;
+    }
+    *our_records = 0;
+    *peer_records = 0;
+    int our_result = ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, our_records);
+    int peer_result = ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, peer_records);
+    return our_result == 0 && peer_result == 0;
+}
+
 static void log_bond_store(const char *phase)
 {
     int our_security_records = 0;
@@ -253,6 +271,99 @@ static void log_bond_store(const char *phase)
         our_result,
         peer_result
     );
+}
+
+static esp_err_t persist_bond_policy_state(bool paired_once, bool rotate_pending)
+{
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(VHOS_BLE_IDENTITY_NAMESPACE, NVS_READWRITE, &handle);
+    if (result != ESP_OK) {
+        return result;
+    }
+    result = nvs_set_u32(handle, VHOS_BLE_BOND_POLICY_KEY, VHOS_BLE_BOND_POLICY_VERSION);
+    if (result == ESP_OK) {
+        result = nvs_set_u8(handle, VHOS_BLE_BONDED_ONCE_KEY, paired_once ? 1U : 0U);
+    }
+    if (result == ESP_OK) {
+        result = nvs_set_u8(
+            handle,
+            VHOS_BLE_ROTATE_PENDING_KEY,
+            rotate_pending ? 1U : 0U
+        );
+    }
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return result;
+}
+
+static bool load_paired_once(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(VHOS_BLE_IDENTITY_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false;
+    }
+    uint8_t paired_once = 0;
+    esp_err_t result = nvs_get_u8(handle, VHOS_BLE_BONDED_ONCE_KEY, &paired_once);
+    nvs_close(handle);
+    return result == ESP_OK && paired_once == 1U;
+}
+
+static void identity_recovery_restart_task(void *argument)
+{
+    (void)argument;
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_restart();
+}
+
+static bool schedule_missing_bond_identity_recovery(uint16_t handle)
+{
+    int our_records = 0;
+    int peer_records = 0;
+    bool counts_available = read_bond_store_counts(&our_records, &peer_records);
+    if (!counts_available || our_records != 0 || peer_records != 0 || !load_paired_once()) {
+        return false;
+    }
+    if (identity_recovery_restart_scheduled) {
+        return true;
+    }
+    esp_err_t persist_result = persist_bond_policy_state(true, true);
+    if (persist_result != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "BLE_BOND_EPOCH_RECOVERY handle=%u action=arm-failed reason=%s",
+            handle,
+            esp_err_to_name(persist_result)
+        );
+        return false;
+    }
+    identity_recovery_restart_scheduled = true;
+    BaseType_t task_result = xTaskCreate(
+        identity_recovery_restart_task,
+        "ble_id_recover",
+        2048,
+        NULL,
+        7,
+        NULL
+    );
+    if (task_result != pdPASS) {
+        identity_recovery_restart_scheduled = false;
+        (void)persist_bond_policy_state(true, false);
+        ESP_LOGE(
+            TAG,
+            "BLE_BOND_EPOCH_RECOVERY handle=%u action=restart-task-failed",
+            handle
+        );
+        return false;
+    }
+    ESP_LOGW(
+        TAG,
+        "BLE_BOND_EPOCH_RECOVERY handle=%u action=rotate-identity-and-restart "
+        "reason=previously-paired-key-database-empty delay_ms=250",
+        handle
+    );
+    return true;
 }
 
 static void log_security_snapshot(uint16_t handle, const char *phase)
@@ -1107,19 +1218,24 @@ static int gap_event(struct ble_gap_event *event, void *argument)
              * work on the same link. End that link immediately so Core Bluetooth can reconnect
              * into a fresh, proactively secured session instead of waiting for HCI supervision.
              */
-            int terminate_result = ble_gap_terminate(
-                event->enc_change.conn_handle,
-                BLE_ERR_REM_USER_CONN_TERM
+            bool rotating_identity = schedule_missing_bond_identity_recovery(
+                event->enc_change.conn_handle
             );
-            ESP_LOGW(
-                TAG,
-                "BLE_SECURITY_RECOVERY action=terminate-tainted-link handle=%u rc=%d "
-                "failed_status=%d failed_status_name=%s",
-                event->enc_change.conn_handle,
-                terminate_result,
-                event->enc_change.status,
-                host_status_name(event->enc_change.status)
-            );
+            if (!rotating_identity) {
+                int terminate_result = ble_gap_terminate(
+                    event->enc_change.conn_handle,
+                    BLE_ERR_REM_USER_CONN_TERM
+                );
+                ESP_LOGW(
+                    TAG,
+                    "BLE_SECURITY_RECOVERY action=terminate-tainted-link handle=%u rc=%d "
+                    "failed_status=%d failed_status_name=%s",
+                    event->enc_change.conn_handle,
+                    terminate_result,
+                    event->enc_change.status,
+                    host_status_name(event->enc_change.status)
+                );
+            }
         }
         return 0;
     }
@@ -1138,6 +1254,14 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         log_bond_store(
             event->pairing_complete.status == 0 ? "pairing-complete" : "pairing-failed"
         );
+        if (event->pairing_complete.status == 0) {
+            esp_err_t policy_result = persist_bond_policy_state(true, false);
+            ESP_LOGI(
+                TAG,
+                "BLE_BOND_POLICY phase=pairing-complete paired_once=1 persist=%s",
+                esp_err_to_name(policy_result)
+            );
+        }
         return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         struct ble_gap_conn_desc description;
@@ -1389,6 +1513,47 @@ static esp_err_t configure_persistent_identity(void)
         VHOS_BLE_GATT_SCHEMA_KEY,
         &stored_gatt_schema
     );
+    uint32_t stored_bond_policy = 0;
+    esp_err_t bond_policy_result = nvs_get_u32(
+        handle,
+        VHOS_BLE_BOND_POLICY_KEY,
+        &stored_bond_policy
+    );
+    uint8_t paired_once_value = 0;
+    esp_err_t paired_once_result = nvs_get_u8(
+        handle,
+        VHOS_BLE_BONDED_ONCE_KEY,
+        &paired_once_value
+    );
+    uint8_t rotate_pending_value = 0;
+    esp_err_t rotate_pending_result = nvs_get_u8(
+        handle,
+        VHOS_BLE_ROTATE_PENDING_KEY,
+        &rotate_pending_value
+    );
+    int our_security_records = 0;
+    int peer_security_records = 0;
+    bool bond_counts_available = read_bond_store_counts(
+        &our_security_records,
+        &peer_security_records
+    );
+    bool bond_store_empty = bond_counts_available &&
+        our_security_records == 0 && peer_security_records == 0;
+    bool prior_policy_missing_bond = identity_present &&
+        bond_policy_result == ESP_ERR_NVS_NOT_FOUND &&
+        schema_result == ESP_OK &&
+        stored_gatt_schema == VHOS_BLE_GATT_SCHEMA_VERSION &&
+        bond_store_empty;
+    bool recorded_pairing_missing_bond = identity_present &&
+        paired_once_result == ESP_OK && paired_once_value == 1U && bond_store_empty;
+    bool pending_identity_recovery = identity_present &&
+        rotate_pending_result == ESP_OK && rotate_pending_value == 1U;
+    bool force_bond_epoch_rotation = prior_policy_missing_bond ||
+        recorded_pairing_missing_bond || pending_identity_recovery;
+    bool paired_once = paired_once_result == ESP_OK && paired_once_value == 1U;
+    if (bond_counts_available && (our_security_records > 0 || peer_security_records > 0)) {
+        paired_once = true;
+    }
     bool compatible_schema_upgrade = identity_present &&
         schema_result == ESP_OK &&
         stored_gatt_schema != VHOS_BLE_GATT_SCHEMA_VERSION &&
@@ -1396,7 +1561,31 @@ static esp_err_t configure_persistent_identity(void)
     bool gatt_schema_changed = identity_present &&
         (schema_result != ESP_OK || !gatt_schema_preserves_bond(stored_gatt_schema));
     bool generated = false;
-    if (compatible_schema_upgrade) {
+    if (force_bond_epoch_rotation) {
+        const char *reason = pending_identity_recovery
+            ? "runtime-security-timeout"
+            : (recorded_pairing_missing_bond
+                ? "previously-paired-key-database-empty"
+                : "dev26-empty-bond-policy-migration");
+        ESP_LOGW(
+            TAG,
+            "BLE_BOND_EPOCH_RECOVERY action=rotate-identity-clear-bonds reason=%s "
+            "our_records=%d peer_records=%d stored_policy=%lu",
+            reason,
+            our_security_records,
+            peer_security_records,
+            bond_policy_result == ESP_OK ? (unsigned long)stored_bond_policy : 0UL
+        );
+        int clear_result = ble_store_clear();
+        if (clear_result != 0) {
+            ESP_LOGE(TAG, "Unable to clear BLE bonds for bond-epoch recovery: rc=%d", clear_result);
+            result = ESP_FAIL;
+        } else {
+            result = generate_and_persist_identity(handle, &identity);
+            generated = result == ESP_OK;
+            paired_once = false;
+        }
+    } else if (compatible_schema_upgrade) {
         ESP_LOGI(
             TAG,
             "BLE_GATT_SCHEMA_MIGRATION stored=%lu current=%u "
@@ -1418,6 +1607,7 @@ static esp_err_t configure_persistent_identity(void)
         } else {
             result = generate_and_persist_identity(handle, &identity);
             generated = result == ESP_OK;
+            paired_once = false;
         }
     } else if (result == ESP_ERR_NVS_NOT_FOUND ||
         result == ESP_ERR_NVS_INVALID_LENGTH ||
@@ -1435,6 +1625,7 @@ static esp_err_t configure_persistent_identity(void)
         } else {
             result = generate_and_persist_identity(handle, &identity);
             generated = result == ESP_OK;
+            paired_once = false;
         }
     } else if (result != ESP_OK) {
         ESP_LOGE(TAG, "Unable to load BLE identity: %s", esp_err_to_name(result));
@@ -1455,6 +1646,7 @@ static esp_err_t configure_persistent_identity(void)
             } else {
                 result = generate_and_persist_identity(handle, &identity);
                 generated = result == ESP_OK;
+                paired_once = false;
                 if (result == ESP_OK) {
                     host_result = ble_hs_id_set_rnd(identity.val);
                 }
@@ -1474,15 +1666,42 @@ static esp_err_t configure_persistent_identity(void)
         }
     }
 
+    if (result == ESP_OK) {
+        result = nvs_set_u32(
+            handle,
+            VHOS_BLE_BOND_POLICY_KEY,
+            VHOS_BLE_BOND_POLICY_VERSION
+        );
+    }
+    if (result == ESP_OK) {
+        result = nvs_set_u8(
+            handle,
+            VHOS_BLE_BONDED_ONCE_KEY,
+            paired_once ? 1U : 0U
+        );
+    }
+    if (result == ESP_OK) {
+        result = nvs_set_u8(handle, VHOS_BLE_ROTATE_PENDING_KEY, 0U);
+    }
+    if (result == ESP_OK) {
+        result = nvs_commit(handle);
+    }
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to persist BLE bond policy: %s", esp_err_to_name(result));
+    }
+
     nvs_close(handle);
     if (result != ESP_OK) {
         return result;
     }
     ESP_LOGI(
         TAG,
-        "BLE_IDENTITY_READY type=random-static source=%s gatt_schema=%u address=%02x:%02x:%02x:%02x:%02x:%02x",
+        "BLE_IDENTITY_READY type=random-static source=%s gatt_schema=%u bond_policy=%u "
+        "paired_once=%u address=%02x:%02x:%02x:%02x:%02x:%02x",
         generated ? "generated" : "persisted",
         VHOS_BLE_GATT_SCHEMA_VERSION,
+        VHOS_BLE_BOND_POLICY_VERSION,
+        paired_once,
         identity.val[5],
         identity.val[4],
         identity.val[3],

@@ -3,9 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "cJSON.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "vhos_can.h"
 #include "vhos_capture_store.h"
 #include "vhos_ota_wifi.h"
@@ -23,6 +26,8 @@
 #define VHOS_CAPTURE_LOG_REQUEST_BYTES 8U
 #define VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES 16U
 #define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 24U
+#define VHOS_CAPTURE_EXPORT_QUEUE_DEPTH 1U
+#define VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES 6144U
 #define VHOS_LIVE_CAN_INTERVAL_US 500000ULL
 
 #ifndef VHOS_BUILD_ID
@@ -43,13 +48,23 @@
 
 #define VHOS_CAPABILITIES "[\"capture.passive\",\"evidence.persistent-log\",\"evidence.export\",\"ota.ab\",\"ota.rollback-self-test\"" VHOS_SIGNED_OTA_CAPABILITY VHOS_STATUS_CAPABILITY "]"
 
+typedef struct {
+    uint8_t slot;
+    uint32_t offset;
+    uint32_t session_generation;
+} vhos_capture_export_request_t;
+
+static const char *TAG = "vhos_transport";
 static uint8_t rx_buffer[VHOS_MAX_FRAME_BYTES];
 static size_t rx_length;
 static uint64_t tx_sequence = 1;
 static char gateway_id_value[40] = "esp32-uninitialized";
 static vhos_transport_emit_fn emit_frame;
 static SemaphoreHandle_t send_lock;
+static SemaphoreHandle_t session_lock;
+static QueueHandle_t capture_export_queue;
 static bool can_observer_registered;
+static uint32_t session_generation;
 static portMUX_TYPE live_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t last_live_can_us;
 
@@ -167,7 +182,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.26\","
+        "\"firmware_version\":\"0.1.0-dev.29\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -336,7 +351,11 @@ static esp_err_t send_capture_log_index(void)
     );
 }
 
-static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
+static esp_err_t send_capture_log_chunk(
+    uint8_t slot,
+    uint32_t offset,
+    uint32_t request_generation
+)
 {
     uint8_t payload[VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES +
                     VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY * VHOS_CAPTURE_RECORD_BYTES] = {0};
@@ -373,13 +392,85 @@ static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
             ? status.current_session_id
             : status.previous_session_id
     );
-    return send_payload(
+    if (session_lock == NULL ||
+        xSemaphoreTake(session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (request_generation != session_generation) {
+        xSemaphoreGive(session_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    result = send_payload(
         VHOS_MESSAGE_CAPTURE_LOG_CHUNK,
         payload,
         VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES + data_length,
         VHOS_TRANSPORT_CHANNEL_STREAM,
         VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
     );
+    xSemaphoreGive(session_lock);
+    return result;
+}
+
+static esp_err_t queue_capture_log_chunk(uint8_t slot, uint32_t offset)
+{
+    if (capture_export_queue == NULL || session_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(session_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    vhos_capture_export_request_t request = {
+        .slot = slot,
+        .offset = offset,
+        .session_generation = session_generation,
+    };
+    xSemaphoreGive(session_lock);
+    if (xQueueSend(capture_export_queue, &request, 0) != pdTRUE) {
+        ESP_LOGW(
+            TAG,
+            "CAPTURE_EXPORT_QUEUE_REJECT slot=%u offset=%lu generation=%lu reason=busy",
+            request.slot,
+            (unsigned long)request.offset,
+            (unsigned long)request.session_generation
+        );
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(
+        TAG,
+        "CAPTURE_EXPORT_QUEUED slot=%u offset=%lu generation=%lu",
+        request.slot,
+        (unsigned long)request.offset,
+        (unsigned long)request.session_generation
+    );
+    return ESP_OK;
+}
+
+static void capture_export_task(void *argument)
+{
+    (void)argument;
+    vhos_capture_export_request_t request;
+    while (true) {
+        if (xQueueReceive(capture_export_queue, &request, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        int64_t started_us = esp_timer_get_time();
+        esp_err_t result = send_capture_log_chunk(
+            request.slot,
+            request.offset,
+            request.session_generation
+        );
+        ESP_LOGI(
+            TAG,
+            "CAPTURE_EXPORT_COMPLETE slot=%u offset=%lu generation=%lu result=%s "
+            "elapsed_ms=%lld stack_high_water=%u",
+            request.slot,
+            (unsigned long)request.offset,
+            (unsigned long)request.session_generation,
+            esp_err_to_name(result),
+            (long long)((esp_timer_get_time() - started_us) / 1000),
+            (unsigned int)uxTaskGetStackHighWaterMark(NULL)
+        );
+    }
 }
 
 static void send_live_can_observation(
@@ -587,7 +678,7 @@ static esp_err_t process_frame(
             return send_capture_log_index();
         }
         if (operation == 1) {
-            return send_capture_log_chunk(payload[2], read_u32_le(&payload[4]));
+            return queue_capture_log_chunk(payload[2], read_u32_le(&payload[4]));
         }
         if (operation == 2) {
             esp_err_t result = vhos_capture_store_rotate();
@@ -614,6 +705,37 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
     if (send_lock == NULL) {
         send_lock = xSemaphoreCreateMutex();
     }
+    if (session_lock == NULL) {
+        session_lock = xSemaphoreCreateMutex();
+    }
+    if (capture_export_queue == NULL) {
+        capture_export_queue = xQueueCreate(
+            VHOS_CAPTURE_EXPORT_QUEUE_DEPTH,
+            sizeof(vhos_capture_export_request_t)
+        );
+        if (capture_export_queue == NULL ||
+            xTaskCreate(
+                capture_export_task,
+                "vhos_export",
+                VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES,
+                NULL,
+                5,
+                NULL
+            ) != pdPASS) {
+            ESP_LOGE(TAG, "CAPTURE_EXPORT_WORKER_UNAVAILABLE");
+            if (capture_export_queue != NULL) {
+                vQueueDelete(capture_export_queue);
+                capture_export_queue = NULL;
+            }
+        } else {
+            ESP_LOGI(
+                TAG,
+                "CAPTURE_EXPORT_WORKER_READY queue_depth=%u stack_bytes=%u",
+                VHOS_CAPTURE_EXPORT_QUEUE_DEPTH,
+                VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES
+            );
+        }
+    }
     if (!can_observer_registered &&
         vhos_can_register_observer(send_live_can_observation, NULL) == ESP_OK) {
         can_observer_registered = true;
@@ -623,6 +745,18 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
 
 void vhos_transport_reset(void)
 {
+    if (session_lock != NULL && xSemaphoreTake(session_lock, portMAX_DELAY) == pdTRUE) {
+        session_generation++;
+        rx_length = 0;
+        memset(rx_buffer, 0, sizeof(rx_buffer));
+        if (capture_export_queue != NULL) {
+            xQueueReset(capture_export_queue);
+        }
+        xSemaphoreGive(session_lock);
+        return;
+    }
+    /* Defensive initialization fallback; normal startup creates the mutex first. */
+    session_generation++;
     rx_length = 0;
     memset(rx_buffer, 0, sizeof(rx_buffer));
 }

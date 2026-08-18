@@ -162,10 +162,37 @@ static esp_err_t rotate_locked(void)
         fclose(current_file);
         current_file = NULL;
     }
-    unlink(VHOS_CAPTURE_PREVIOUS_PATH);
-    if (file_size(VHOS_CAPTURE_CURRENT_PATH) >= VHOS_CAPTURE_HEADER_BYTES &&
-        rename(VHOS_CAPTURE_CURRENT_PATH, VHOS_CAPTURE_PREVIOUS_PATH) != 0) {
-        ESP_LOGW(TAG, "Unable to retain previous capture segment");
+
+    uint32_t current_bytes = file_size(VHOS_CAPTURE_CURRENT_PATH);
+    uint32_t previous_bytes = file_size(VHOS_CAPTURE_PREVIOUS_PATH);
+    bool current_has_complete_record =
+        current_bytes >= VHOS_CAPTURE_HEADER_BYTES + VHOS_CAPTURE_RECORD_BYTES;
+    if (current_has_complete_record) {
+        unlink(VHOS_CAPTURE_PREVIOUS_PATH);
+        if (rename(VHOS_CAPTURE_CURRENT_PATH, VHOS_CAPTURE_PREVIOUS_PATH) != 0) {
+            ESP_LOGE(
+                TAG,
+                "CAPTURE_ROTATE_FAILED current_bytes=%lu previous_bytes=%lu "
+                "action=preserve-current-stop-rotation",
+                (unsigned long)current_bytes,
+                (unsigned long)previous_bytes
+            );
+            return ESP_FAIL;
+        }
+        ESP_LOGI(
+            TAG,
+            "CAPTURE_ROTATE_PROMOTED current_bytes=%lu previous_bytes=%lu",
+            (unsigned long)current_bytes,
+            (unsigned long)previous_bytes
+        );
+    } else {
+        ESP_LOGI(
+            TAG,
+            "CAPTURE_ROTATE_PRESERVED_PREVIOUS current_bytes=%lu previous_bytes=%lu "
+            "reason=no-complete-current-record",
+            (unsigned long)current_bytes,
+            (unsigned long)previous_bytes
+        );
     }
     portENTER_CRITICAL(&sample_lock);
     memset(sample_buckets, 0, sizeof(sample_buckets));
