@@ -61,9 +61,10 @@ gateway; it is not silently discarded.
 | Field | Value |
 | --- | --- |
 | Application version | `0.1.0-dev.31` |
+| Embedded build ID | `v0.1.0-dev.11-10-gdb1d68d4d5cb` |
 | Candidate | `targets/mrdiy-esp32-v13/build/vhos_mrdiy_esp32_v13.bin` |
 | Size | 1,048,496 bytes |
-| SHA-256 | `bdac56dc911b0e34b1f78f640f71e70f084d6409adb43c1c4a4b76b85a4a5add` |
+| SHA-256 | `a4234a4cea591a6759f49457dac39fd1e50237556d46674db348d07dfef5d72e` |
 | Smallest application partition | 1,572,864 bytes (`0x180000`) |
 | Build free space | 524,368 bytes (`0x80050`, 33%) |
 | Build environment | `espressif/idf:v5.5.3`, target `esp32` |
