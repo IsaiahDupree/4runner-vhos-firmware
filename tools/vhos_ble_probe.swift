@@ -8,7 +8,6 @@ import Foundation
 private let vhosService = CBUUID(string: "33613EB3-FFCA-42D1-83FA-A18F12B3F123")
 private let commandCharacteristic = CBUUID(string: "B3D3279B-0244-4D54-A2AB-A1AB47A5FC0A")
 private let streamCharacteristic = CBUUID(string: "265B90C0-A600-4659-BBBD-5CDA411C49CC")
-private let statusCharacteristic = CBUUID(string: "BCB5699A-A9B4-49B8-B69B-D2DFF19B41A9")
 private let factoryService = CBUUID(string: "FEE0")
 private let securityRetryLimit = 30
 
@@ -51,7 +50,7 @@ private extension Data {
 
 private func handshakeFrame() throws -> Data {
   let payload = try JSONSerialization.data(withJSONObject: [
-    "contract": "gateway.handshake",
+    "contract": "gateway.handshake.request",
     "contract_version": "1.0.0",
   ], options: [.sortedKeys])
   var header = Data("VHOS".utf8)
@@ -198,7 +197,7 @@ final class VHOSBLEProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     }
     print("SERVICE_PASS uuid=\(service.uuid.uuidString)")
     peripheral.discoverCharacteristics(
-      [commandCharacteristic, streamCharacteristic, statusCharacteristic],
+      [commandCharacteristic, streamCharacteristic],
       for: service
     )
   }
@@ -218,12 +217,8 @@ final class VHOSBLEProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     guard let stream = characteristics.first(where: { $0.uuid == streamCharacteristic }) else {
       return finishFailure("stream characteristic not found")
     }
-    guard let status = characteristics.first(where: { $0.uuid == statusCharacteristic }) else {
-      return finishFailure("status characteristic not found")
-    }
     print("CHARACTERISTICS_PASS")
     peripheral.setNotifyValue(true, for: stream)
-    peripheral.setNotifyValue(true, for: status)
   }
 
   func peripheral(
@@ -256,7 +251,7 @@ final class VHOSBLEProbe: NSObject, CBCentralManagerDelegate, CBPeripheralDelega
     notificationAttempts[characteristic.uuid] = 0
     if characteristic.isNotifying { notifying.insert(characteristic.uuid) }
     print("NOTIFY uuid=\(characteristic.uuid.uuidString) active=\(characteristic.isNotifying)")
-    guard notifying.contains(streamCharacteristic), notifying.contains(statusCharacteristic) else {
+    guard notifying.contains(streamCharacteristic) else {
       return
     }
     sendHandshakeIfReady()

@@ -21,6 +21,10 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev12 physical flash record](FIELD-FLASH-2026-08-17-DEV12.md) | Device identity, private recovery-backup checksum, NVS-preserving segment plan, boot evidence, and remaining physical gates. |
 | [dev13 physical flash and GATT recovery record](FIELD-FLASH-2026-08-17-DEV13.md) | Signed segment flash, one-time identity migration, bond cleanup, independent macOS service enumeration, and remaining iPhone acceptance gate. |
 | [dev14 physical flash and iPhone acceptance record](FIELD-FLASH-2026-08-17-DEV14.md) | Canonical device naming, recovery evidence, application-only flash boundary, boot proof, and real iPhone GATT/handshake/health acceptance. |
+| [dev23 bonded-reconnect validation](FIELD-VALIDATION-2026-08-17-DEV23.md) | Dev21/dev22 failure evidence, NimBLE pre-CONNECT restoration ordering, exact dev23 build hash, Mac diagnostics, and physical restored-data plus saved-identity Disconnect/Reconnect acceptance. |
+| [dev24 transport and GATT review closure](FIELD-VALIDATION-2026-08-17-DEV24.md) | Complete-frame session gating, strict handshake request validation, epoch-2/epoch-6 GATT compatibility audit, bond-preserving migration, exact build hash, and remaining physical gates. |
+| [dev25 delivery-gate validation](FIELD-VALIDATION-2026-08-17-DEV25.md) | Bootstrap-only pre-session output, admission and delivery authorization, host-epoch RX/TX clearing, exact unsigned build identity, and remaining physical gates. |
+| [dev26 deferred-control validation and physical acceptance](FIELD-VALIDATION-2026-08-17-DEV26.md) | Dev25 TX-stack failure, deferred initial health/status, exact build identity, saved-bond commissioning, sustained health, and automatic hard-reset recovery. |
 
 ## Governing rule
 
@@ -71,3 +75,30 @@ new database automatically while preserving CAN captures and every unrelated sto
 `v0.1.0-dev.14` adopts the product-wide `VHOS-4R-OBD-<MAC suffix>` display name. The label is
 derived from silicon identity and does not replace the immutable gateway ID, rotate the persistent
 BLE identity, or modify stored bonds and evidence lineage.
+
+`v0.1.0-dev.23` preserves NimBLE bond restoration events that can precede GAP `CONNECT`. The
+effective connect state is derived from the live connection descriptor plus restored CCCD events;
+an already encrypted bonded link never starts another Security Manager procedure. Fresh links
+remain bonded, encrypted, and Secure-Connections capable, and all outbound contracts use one
+physical encrypted stream subscription.
+
+`v0.1.0-dev.24` separates buffered transport progress from a completed application session. Only
+a complete CRC-valid and allowlisted handshake request whose responses were queued opens live
+health. It also records epoch `2` as explicitly bond-compatible with the attribute-identical epoch
+`6`, allowing that audited migration to retain the BLE identity, security records, and CCCDs.
+
+`v0.1.0-dev.25` applies the session contract to all outbound traffic. Only the handshake response
+has a narrowly typed bootstrap scope. Its queue item is bound to the admission connection epoch,
+and the TX task establishes readiness only after every notification chunk succeeds in that same
+epoch. Initial health, live CAN, and every other frame require the established application session.
+Queue admission and chunk delivery revalidate link state, and a NimBLE host reset clears
+incremental receive state plus all pending transmit items.
+
+`v0.1.0-dev.26` moves initial health/status construction off the 4 KB BLE TX stack after a physical
+dev25 run proved a deterministic overflow. TX now only proves handshake delivery, transitions the
+session, and wakes the existing 6 KB health/control task. That task publishes the session-required
+initial frames and logs its stack high-water mark; the connection-epoch and authorization model is
+unchanged. Physical USB-bench acceptance reused the saved bond, sustained recurring health for
+more than two minutes, and automatically reconnected and verified dev26 after a deliberate Mac
+chip-id hard reset, with no Pair/Forget/NVS erase. CAN remained at the expected zero-frame state
+because the bench gateway was not connected to the vehicle.

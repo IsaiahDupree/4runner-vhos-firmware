@@ -24,9 +24,12 @@
 #include "vhos_transport.h"
 
 #define VHOS_BLE_TX_MAX_BYTES 1100U
+#define VHOS_BLE_FRAME_HEADER_BYTES 36U
+#define VHOS_BLE_FRAME_MESSAGE_HANDSHAKE 1U
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
 #define VHOS_BLE_NOTIFICATION_PACE_MS 15U
 #define VHOS_BLE_MBUF_RETRY_LIMIT 20U
+#define VHOS_BLE_SECURITY_START_DELAY_MS 150U
 #define VHOS_BLE_CONN_INTERVAL_MIN 24U
 #define VHOS_BLE_CONN_INTERVAL_MAX 40U
 #define VHOS_BLE_CONN_LATENCY 0U
@@ -34,11 +37,15 @@
 #define VHOS_BLE_IDENTITY_NAMESPACE "vhos_ble_id"
 #define VHOS_BLE_IDENTITY_KEY "identity_v1"
 #define VHOS_BLE_GATT_SCHEMA_KEY "gatt_schema"
-#define VHOS_BLE_GATT_SCHEMA_VERSION 2U
+#define VHOS_BLE_GATT_SCHEMA_VERSION 6U
+#define VHOS_BLE_GATT_SCHEMA_BOND_COMPATIBLE_VERSION 2U
 
 typedef struct {
     size_t length;
     vhos_transport_channel_t channel;
+    vhos_transport_emit_scope_t scope;
+    uint16_t connection_handle;
+    uint32_t connection_epoch;
     uint8_t data[VHOS_BLE_TX_MAX_BYTES];
 } vhos_ble_tx_item_t;
 
@@ -53,6 +60,10 @@ static bool stream_notify_enabled;
 static bool status_notify_enabled;
 static bool ota_status_notify_enabled;
 static bool link_encrypted;
+static bool application_session_ready;
+static bool application_handshake_pending;
+static bool initial_session_publish_pending;
+static uint32_t connection_epoch;
 static bool host_ready;
 static bool advertising_active;
 static bool connection_parameters_available;
@@ -63,7 +74,10 @@ static uint16_t active_supervision_timeout;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static QueueHandle_t tx_queue;
 static SemaphoreHandle_t ready_semaphore;
+static TaskHandle_t health_task_handle;
 static struct ble_npl_callout advertising_retry_callout;
+static struct ble_npl_callout security_start_callout;
+static uint32_t security_start_epoch;
 
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(
     0x23, 0xf1, 0xb3, 0x12, 0x8f, 0xa1, 0xfa, 0x83,
@@ -86,6 +100,285 @@ static const ble_uuid128_t ota_status_uuid = BLE_UUID128_INIT(
     0xb3, 0x4d, 0x90, 0xd1, 0x8e, 0x1f, 0xd2, 0x18
 );
 
+static const char *host_status_name(int status)
+{
+    switch (status) {
+    case 0:
+        return "success";
+    case BLE_HS_EALREADY:
+        return "already-in-progress";
+    case BLE_HS_ENOTCONN:
+        return "not-connected";
+    case BLE_HS_ETIMEOUT:
+        return "host-procedure-timeout";
+    case BLE_HS_EAUTHEN:
+        return "authentication-failed";
+    case BLE_HS_EENCRYPT:
+        return "encryption-failed";
+    case BLE_HS_EENCRYPT_KEY_SZ:
+        return "invalid-encryption-key-size";
+    case BLE_HS_ESTORE_CAP:
+        return "security-store-capacity";
+    case BLE_HS_ESTORE_FAIL:
+        return "security-store-failure";
+    default:
+        break;
+    }
+    if (status > BLE_HS_ERR_SM_US_BASE && status < BLE_HS_ERR_SM_PEER_BASE) {
+        return "local-security-manager-error";
+    }
+    if (status > BLE_HS_ERR_SM_PEER_BASE && status < BLE_HS_ERR_HW_BASE) {
+        return "peer-security-manager-error";
+    }
+    if (status > BLE_HS_ERR_HCI_BASE && status < BLE_HS_ERR_L2C_BASE) {
+        return "controller-hci-error";
+    }
+    return "other-host-error";
+}
+
+static const char *sm_error_name(unsigned int code)
+{
+    switch (code) {
+    case BLE_SM_ERR_PASSKEY:
+        return "passkey-entry-failed";
+    case BLE_SM_ERR_OOB:
+        return "oob-unavailable";
+    case BLE_SM_ERR_AUTHREQ:
+        return "authentication-requirements";
+    case BLE_SM_ERR_CONFIRM_MISMATCH:
+        return "confirm-value-mismatch";
+    case BLE_SM_ERR_PAIR_NOT_SUPP:
+        return "pairing-not-supported";
+    case BLE_SM_ERR_ENC_KEY_SZ:
+        return "encryption-key-size";
+    case BLE_SM_ERR_CMD_NOT_SUPP:
+        return "security-command-not-supported";
+    case BLE_SM_ERR_UNSPECIFIED:
+        return "unspecified-security-error";
+    case BLE_SM_ERR_REPEATED:
+        return "repeated-attempts";
+    case BLE_SM_ERR_INVAL:
+        return "invalid-security-parameters";
+    case BLE_SM_ERR_DHKEY:
+        return "dhkey-check-failed";
+    case BLE_SM_ERR_NUMCMP:
+        return "numeric-comparison-failed";
+    case BLE_SM_ERR_ALREADY:
+        return "bond-already-exists";
+    case BLE_SM_ERR_CROSS_TRANS:
+        return "cross-transport-key-derivation";
+    case BLE_SM_ERR_KEY_REJ:
+        return "key-rejected";
+    default:
+        return "unknown-security-error";
+    }
+}
+
+static const char *hci_error_name(unsigned int code)
+{
+    switch (code) {
+    case BLE_ERR_AUTH_FAIL:
+        return "authentication-failure";
+    case BLE_ERR_PINKEY_MISSING:
+        return "pin-or-key-missing";
+    case BLE_ERR_CONN_SPVN_TMO:
+        return "connection-supervision-timeout";
+    case BLE_ERR_CMD_DISALLOWED:
+        return "command-disallowed";
+    case BLE_ERR_REM_USER_CONN_TERM:
+        return "remote-user-terminated";
+    case BLE_ERR_CONN_TERM_LOCAL:
+        return "local-host-terminated";
+    case BLE_ERR_REPEATED_ATTEMPTS:
+        return "repeated-attempts";
+    case BLE_ERR_NO_PAIRING:
+        return "pairing-not-allowed";
+    case BLE_ERR_ENCRYPTION_MODE:
+        return "unsupported-encryption-mode";
+    case BLE_ERR_INSUFFICIENT_SEC:
+        return "insufficient-security";
+    default:
+        return "unknown-hci-error";
+    }
+}
+
+static const char *subscribe_reason_name(uint8_t reason)
+{
+    switch (reason) {
+    case BLE_GAP_SUBSCRIBE_REASON_WRITE:
+        return "cccd-write";
+    case BLE_GAP_SUBSCRIBE_REASON_TERM:
+        return "link-termination";
+    case BLE_GAP_SUBSCRIBE_REASON_RESTORE:
+        return "bond-restore";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *passkey_action_name(uint8_t action)
+{
+    switch (action) {
+    case BLE_SM_IOACT_NONE:
+        return "just-works-none";
+    case BLE_SM_IOACT_OOB:
+        return "legacy-oob";
+    case BLE_SM_IOACT_INPUT:
+        return "passkey-input";
+    case BLE_SM_IOACT_DISP:
+        return "passkey-display";
+    case BLE_SM_IOACT_NUMCMP:
+        return "numeric-comparison";
+    case BLE_SM_IOACT_OOB_SC:
+        return "secure-connections-oob";
+    case BLE_SM_IOACT_STATIC:
+        return "static-passkey";
+    default:
+        return "unknown";
+    }
+}
+
+static void log_bond_store(const char *phase)
+{
+    int our_security_records = 0;
+    int peer_security_records = 0;
+    int our_result = ble_store_util_count(BLE_STORE_OBJ_TYPE_OUR_SEC, &our_security_records);
+    int peer_result = ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &peer_security_records);
+    ESP_LOGI(
+        TAG,
+        "BLE_BOND_STORE phase=%s our_records=%d peer_records=%d our_rc=%d peer_rc=%d",
+        phase,
+        our_security_records,
+        peer_security_records,
+        our_result,
+        peer_result
+    );
+}
+
+static void log_security_snapshot(uint16_t handle, const char *phase)
+{
+    struct ble_gap_conn_desc description;
+    int result = ble_gap_conn_find(handle, &description);
+    if (result != 0) {
+        ESP_LOGW(
+            TAG,
+            "BLE_SECURITY_STATE phase=%s handle=%u unavailable_rc=%d status=%s",
+            phase,
+            handle,
+            result,
+            host_status_name(result)
+        );
+        return;
+    }
+    ESP_LOGI(
+        TAG,
+        "BLE_SECURITY_STATE phase=%s handle=%u encrypted=%u authenticated=%u bonded=%u "
+        "authorized=%u key_size=%u peer_id_type=%u peer_id=%02x:%02x:%02x:%02x:%02x:%02x "
+        "peer_ota_type=%u peer_ota=%02x:%02x:%02x:%02x:%02x:%02x",
+        phase,
+        handle,
+        description.sec_state.encrypted,
+        description.sec_state.authenticated,
+        description.sec_state.bonded,
+        description.sec_state.authorize,
+        description.sec_state.key_size,
+        description.peer_id_addr.type,
+        description.peer_id_addr.val[5],
+        description.peer_id_addr.val[4],
+        description.peer_id_addr.val[3],
+        description.peer_id_addr.val[2],
+        description.peer_id_addr.val[1],
+        description.peer_id_addr.val[0],
+        description.peer_ota_addr.type,
+        description.peer_ota_addr.val[5],
+        description.peer_ota_addr.val[4],
+        description.peer_ota_addr.val[3],
+        description.peer_ota_addr.val[2],
+        description.peer_ota_addr.val[1],
+        description.peer_ota_addr.val[0]
+    );
+}
+
+static void security_start_event(struct ble_npl_event *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&state_lock);
+    uint16_t handle = connection_handle;
+    uint32_t active_epoch = connection_epoch;
+    uint32_t scheduled_epoch = security_start_epoch;
+    portEXIT_CRITICAL(&state_lock);
+    if (handle == BLE_HS_CONN_HANDLE_NONE || active_epoch != scheduled_epoch) {
+        ESP_LOGI(
+            TAG,
+            "BLE_SECURITY_INITIATE skipped=stale-link active_epoch=%lu scheduled_epoch=%lu",
+            (unsigned long)active_epoch,
+            (unsigned long)scheduled_epoch
+        );
+        return;
+    }
+    struct ble_gap_conn_desc description;
+    int description_result = ble_gap_conn_find(handle, &description);
+    if (description_result != 0) {
+        ESP_LOGW(
+            TAG,
+            "BLE_SECURITY_INITIATE skipped=descriptor-unavailable handle=%u rc=%d status=%s",
+            handle,
+            description_result,
+            host_status_name(description_result)
+        );
+        return;
+    }
+    if (description.sec_state.encrypted) {
+        portENTER_CRITICAL(&state_lock);
+        link_encrypted = true;
+        portEXIT_CRITICAL(&state_lock);
+        ESP_LOGI(
+            TAG,
+            "BLE_SECURITY_INITIATE skipped=already-encrypted handle=%u bonded=%u "
+            "authenticated=%u key_size=%u",
+            handle,
+            description.sec_state.bonded,
+            description.sec_state.authenticated,
+            description.sec_state.key_size
+        );
+        log_security_snapshot(handle, "security-initiate-skipped-restored-link");
+        log_bond_store("security-initiate-skipped-restored-link");
+        return;
+    }
+    log_security_snapshot(handle, "before-initiate-unencrypted-link");
+    int result = ble_gap_security_initiate(handle);
+    ESP_LOGI(
+        TAG,
+        "BLE_SECURITY_INITIATE trigger=link-established handle=%u rc=%d status=%s",
+        handle,
+        result,
+        host_status_name(result)
+    );
+}
+
+static void schedule_security_start(uint16_t handle)
+{
+    portENTER_CRITICAL(&state_lock);
+    security_start_epoch = connection_epoch;
+    uint32_t scheduled_epoch = security_start_epoch;
+    portEXIT_CRITICAL(&state_lock);
+    ble_npl_error_t result = ble_npl_callout_reset(
+        &security_start_callout,
+        ble_npl_time_ms_to_ticks32(VHOS_BLE_SECURITY_START_DELAY_MS)
+    );
+    if (result != BLE_NPL_OK) {
+        ESP_LOGE(TAG, "BLE_SECURITY_SCHEDULE handle=%u failed_rc=%d", handle, result);
+    } else {
+        ESP_LOGI(
+            TAG,
+            "BLE_SECURITY_SCHEDULE handle=%u delay_ms=%u epoch=%lu",
+            handle,
+            VHOS_BLE_SECURITY_START_DELAY_MS,
+            (unsigned long)scheduled_epoch
+        );
+    }
+}
+
 static int gatt_access(
     uint16_t conn_handle,
     uint16_t attr_handle,
@@ -93,9 +386,26 @@ static int gatt_access(
     void *argument
 )
 {
-    (void)conn_handle;
     (void)argument;
     if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attr_handle == command_value_handle) {
+        portENTER_CRITICAL(&state_lock);
+        uint16_t active_connection = connection_handle;
+        bool encrypted = link_encrypted;
+        bool subscribed = stream_notify_enabled;
+        bool session_ready = application_session_ready;
+        portEXIT_CRITICAL(&state_lock);
+        if (conn_handle != active_connection || !encrypted || !subscribed) {
+            ESP_LOGW(
+                TAG,
+                "BLE_COMMAND_REJECT handle=%u active_handle=%u encrypted=%u "
+                "stream_notify=%u reason=bootstrap-transport-not-ready",
+                conn_handle,
+                active_connection,
+                encrypted,
+                subscribed
+            );
+            return BLE_ATT_ERR_UNLIKELY;
+        }
         uint16_t length = OS_MBUF_PKTLEN(context->om);
         uint8_t fragment[512];
         if (length == 0 || length > sizeof(fragment)) {
@@ -106,10 +416,41 @@ static int gatt_access(
         if (result != 0 || flattened != length) {
             return BLE_ATT_ERR_UNLIKELY;
         }
-        esp_err_t ingest_result = vhos_transport_ingest(fragment, flattened);
+        vhos_transport_ingest_result_t completion = {0};
+        esp_err_t ingest_result = vhos_transport_ingest(
+            fragment,
+            flattened,
+            session_ready,
+            &completion
+        );
         if (ingest_result != ESP_OK && ingest_result != ESP_ERR_NOT_SUPPORTED) {
             ESP_LOGW(TAG, "Rejected command fragment: %s", esp_err_to_name(ingest_result));
             return BLE_ATT_ERR_UNLIKELY;
+        }
+        if (completion.handshake_accepted) {
+            ESP_LOGI(
+                TAG,
+                "BLE_APPLICATION_HANDSHAKE_PENDING handle=%u completed_frames=%u "
+                "proof=crc-valid-request-and-response-queued",
+                conn_handle,
+                (unsigned int)completion.completed_frames
+            );
+        } else if (completion.completed_frames > 0) {
+            ESP_LOGI(
+                TAG,
+                "BLE_APPLICATION_FRAME_COMPLETE handle=%u completed_frames=%u "
+                "session_ready=%u",
+                conn_handle,
+                (unsigned int)completion.completed_frames,
+                session_ready
+            );
+        } else if (ingest_result == ESP_OK) {
+            ESP_LOGD(
+                TAG,
+                "BLE_APPLICATION_FRAME_PENDING handle=%u fragment_bytes=%u",
+                conn_handle,
+                flattened
+            );
         }
         return 0;
     }
@@ -159,21 +500,121 @@ static const struct ble_gatt_svc_def services[] = {
     {0},
 };
 
+static const char *emit_scope_name(vhos_transport_emit_scope_t scope)
+{
+    switch (scope) {
+    case VHOS_TRANSPORT_EMIT_SESSION_REQUIRED:
+        return "session-required";
+    case VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE:
+        return "bootstrap-handshake";
+    default:
+        return "invalid";
+    }
+}
+
+static bool emit_scope_is_bootstrap(vhos_transport_emit_scope_t scope)
+{
+    return scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE;
+}
+
+static bool emit_scope_matches_frame(
+    vhos_transport_emit_scope_t scope,
+    const uint8_t *data,
+    size_t length
+)
+{
+    if (data == NULL || length < VHOS_BLE_FRAME_HEADER_BYTES || memcmp(data, "VHOS", 4) != 0) {
+        return false;
+    }
+    switch (scope) {
+    case VHOS_TRANSPORT_EMIT_SESSION_REQUIRED:
+        return true;
+    case VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE:
+        return data[6] == VHOS_BLE_FRAME_MESSAGE_HANDSHAKE;
+    default:
+        return false;
+    }
+}
+
+/* Caller holds state_lock. Bootstrap is the only pre-session exception. */
+static bool emit_authorized_locked(vhos_transport_emit_scope_t scope)
+{
+    bool transport_ready = connection_handle != BLE_HS_CONN_HANDLE_NONE &&
+                           link_encrypted && stream_notify_enabled;
+    if (!transport_ready) {
+        return false;
+    }
+    return emit_scope_is_bootstrap(scope) ? !application_session_ready
+                                          : application_session_ready;
+}
+
+/* Caller holds state_lock. Items are bound to the connection epoch that admitted them. */
+static bool tx_item_authorized_locked(const vhos_ble_tx_item_t *item)
+{
+    return item != NULL && item->connection_handle == connection_handle &&
+           item->connection_epoch == connection_epoch && emit_authorized_locked(item->scope);
+}
+
 static esp_err_t emit_frame(
     const uint8_t *data,
     size_t length,
-    vhos_transport_channel_t channel
+    vhos_transport_channel_t channel,
+    vhos_transport_emit_scope_t scope
 )
 {
-    if (data == NULL || length == 0 || length > VHOS_BLE_TX_MAX_BYTES || tx_queue == NULL) {
+    if (length > VHOS_BLE_TX_MAX_BYTES || tx_queue == NULL ||
+        !emit_scope_matches_frame(scope, data, length)) {
         return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&state_lock);
+    bool authorized = emit_authorized_locked(scope);
+    uint16_t active_connection = connection_handle;
+    bool encrypted = link_encrypted;
+    bool subscribed = stream_notify_enabled;
+    bool session_ready = application_session_ready;
+    bool handshake_pending = application_handshake_pending;
+    uint32_t active_epoch = connection_epoch;
+    if (authorized && scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
+        authorized = !application_handshake_pending;
+        if (authorized) {
+            application_handshake_pending = true;
+        }
+    }
+    portEXIT_CRITICAL(&state_lock);
+    if (!authorized) {
+        ESP_LOGD(
+            TAG,
+            "BLE_TX_ADMISSION_REJECT scope=%s handle=%u encrypted=%u stream_notify=%u "
+            "session_ready=%u handshake_pending=%u",
+            emit_scope_name(scope),
+            active_connection,
+            encrypted,
+            subscribed,
+            session_ready,
+            handshake_pending
+        );
+        return ESP_ERR_INVALID_STATE;
     }
     vhos_ble_tx_item_t item = {
         .length = length,
         .channel = channel,
+        .scope = scope,
+        .connection_handle = active_connection,
+        .connection_epoch = active_epoch,
     };
     memcpy(item.data, data, length);
-    return xQueueSend(tx_queue, &item, 0) == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM;
+    if (xQueueSend(tx_queue, &item, 0) == pdTRUE) {
+        return ESP_OK;
+    }
+    if (scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
+        portENTER_CRITICAL(&state_lock);
+        if (connection_handle == active_connection && connection_epoch == active_epoch &&
+            !application_session_ready) {
+            application_handshake_pending = false;
+        }
+        portEXIT_CRITICAL(&state_lock);
+    }
+    return ESP_ERR_NO_MEM;
 }
 
 static void tx_task(void *argument)
@@ -185,27 +626,46 @@ static void tx_task(void *argument)
             continue;
         }
         portENTER_CRITICAL(&state_lock);
-        bool subscribed;
-        uint16_t value_handle;
-        if (item.channel == VHOS_TRANSPORT_CHANNEL_HEALTH) {
-            subscribed = status_notify_enabled;
-            value_handle = status_value_handle;
-        } else if (item.channel == VHOS_TRANSPORT_CHANNEL_OTA) {
-            subscribed = ota_status_notify_enabled;
-            value_handle = ota_status_value_handle;
-        } else {
-            subscribed = stream_notify_enabled;
-            value_handle = stream_value_handle;
-        }
-        uint16_t active_connection = connection_handle;
+        /*
+         * Every VHOS frame is self-describing and CRC protected. Multiplex all outbound frame
+         * types over one encrypted notification characteristic so commissioning requires only
+         * one CCCD transaction. Separate encrypted CCCD writes proved vulnerable to being lost
+         * while iOS Just Works pairing was still completing.
+         */
+        bool authorized = tx_item_authorized_locked(&item);
+        uint16_t value_handle = stream_value_handle;
+        uint16_t active_connection = item.connection_handle;
+        uint32_t active_epoch = item.connection_epoch;
         portEXIT_CRITICAL(&state_lock);
-        if (!subscribed || active_connection == BLE_HS_CONN_HANDLE_NONE) {
+        if (!authorized) {
+            if (item.scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
+                portENTER_CRITICAL(&state_lock);
+                if (connection_handle == active_connection && connection_epoch == active_epoch &&
+                    !application_session_ready) {
+                    application_handshake_pending = false;
+                }
+                portEXIT_CRITICAL(&state_lock);
+            }
+            ESP_LOGD(
+                TAG,
+                "BLE_TX_DELIVERY_DROP scope=%s reason=session-or-transport-gate",
+                emit_scope_name(item.scope)
+            );
             continue;
         }
 
         uint16_t mtu = ble_att_mtu(active_connection);
         size_t maximum_chunk = mtu > 3 ? (size_t)mtu - 3 : 20;
+        bool delivery_complete = true;
+        size_t delivered_bytes = 0;
         for (size_t offset = 0; offset < item.length; offset += maximum_chunk) {
+            portENTER_CRITICAL(&state_lock);
+            bool session_current = tx_item_authorized_locked(&item);
+            portEXIT_CRITICAL(&state_lock);
+            if (!session_current) {
+                delivery_complete = false;
+                break;
+            }
             size_t remaining = item.length - offset;
             size_t chunk_length = remaining < maximum_chunk ? remaining : maximum_chunk;
             struct os_mbuf *packet = NULL;
@@ -218,20 +678,87 @@ static void tx_task(void *argument)
             }
             if (packet == NULL) {
                 ESP_LOGE(TAG, "Unable to allocate BLE notification packet after retries");
+                delivery_complete = false;
                 break;
             }
             if (os_mbuf_append(packet, &item.data[offset], chunk_length) != 0) {
                 os_mbuf_free_chain(packet);
                 ESP_LOGE(TAG, "Unable to append BLE notification packet");
+                delivery_complete = false;
+                break;
+            }
+            portENTER_CRITICAL(&state_lock);
+            bool delivery_still_authorized = tx_item_authorized_locked(&item);
+            portEXIT_CRITICAL(&state_lock);
+            if (!delivery_still_authorized) {
+                os_mbuf_free_chain(packet);
+                delivery_complete = false;
                 break;
             }
             int result = ble_gatts_notify_custom(active_connection, value_handle, packet);
             if (result != 0) {
-                ESP_LOGW(TAG, "BLE notify failed: rc=%d", result);
+                ESP_LOGW(
+                    TAG,
+                    "BLE_NOTIFY_FAILED scope=%s handle=%u epoch=%lu offset=%u rc=%d",
+                    emit_scope_name(item.scope),
+                    active_connection,
+                    (unsigned long)active_epoch,
+                    (unsigned int)offset,
+                    result
+                );
+                delivery_complete = false;
                 break;
             }
+            delivered_bytes += chunk_length;
             /* Keep the controller pool below saturation when ATT MTU is still 23 bytes. */
             vTaskDelay(pdMS_TO_TICKS(VHOS_BLE_NOTIFICATION_PACE_MS));
+        }
+
+        if (item.scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
+            bool session_transition = false;
+            portENTER_CRITICAL(&state_lock);
+            bool same_epoch = connection_handle == active_connection &&
+                              connection_epoch == active_epoch;
+            if (delivery_complete && delivered_bytes == item.length && same_epoch &&
+                link_encrypted && stream_notify_enabled && application_handshake_pending &&
+                !application_session_ready) {
+                application_handshake_pending = false;
+                application_session_ready = true;
+                initial_session_publish_pending = true;
+                session_transition = true;
+            } else if (same_epoch && !application_session_ready) {
+                application_handshake_pending = false;
+            }
+            portEXIT_CRITICAL(&state_lock);
+
+            if (!session_transition) {
+                ESP_LOGW(
+                    TAG,
+                    "BLE_APPLICATION_HANDSHAKE_DELIVERY_FAILED handle=%u epoch=%lu "
+                    "delivered=%u total=%u",
+                    active_connection,
+                    (unsigned long)active_epoch,
+                    (unsigned int)delivered_bytes,
+                    (unsigned int)item.length
+                );
+                continue;
+            }
+
+            ESP_LOGI(
+                TAG,
+                "BLE_APPLICATION_SESSION_READY handle=%u epoch=%lu "
+                "proof=crc-valid-request-and-handshake-response-notified bytes=%u",
+                active_connection,
+                (unsigned long)active_epoch,
+                (unsigned int)delivered_bytes
+            );
+            TaskHandle_t control_task = health_task_handle;
+            if (control_task != NULL) {
+                xTaskNotifyGive(control_task);
+            } else {
+                /* The periodic health timeout will still observe the pending flag. */
+                ESP_LOGE(TAG, "BLE_SESSION_CONTROL_DEFER_FAILED reason=health-task-unavailable");
+            }
         }
     }
 }
@@ -240,15 +767,61 @@ static void health_task(void *argument)
 {
     (void)argument;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        uint32_t notification_count = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
         portENTER_CRITICAL(&state_lock);
         bool can_send = connection_handle != BLE_HS_CONN_HANDLE_NONE &&
-                        link_encrypted && status_notify_enabled;
+                        link_encrypted && stream_notify_enabled && application_session_ready;
+        bool initial_publish = can_send && initial_session_publish_pending;
+        uint16_t active_connection = connection_handle;
+        uint32_t active_epoch = connection_epoch;
+        if (initial_publish) {
+            initial_session_publish_pending = false;
+        }
         portEXIT_CRITICAL(&state_lock);
         if (can_send) {
-            esp_err_t result = vhos_transport_send_health();
-            if (result != ESP_OK && result != ESP_ERR_NO_MEM) {
-                ESP_LOGW(TAG, "Health queue failed: %s", esp_err_to_name(result));
+            if (initial_publish) {
+                log_security_snapshot(active_connection, "application-session-ready");
+                log_bond_store("application-session-ready");
+            }
+            esp_err_t health_result = vhos_transport_send_health();
+            bool health_queued = health_result == ESP_OK;
+            if (!health_queued && health_result != ESP_ERR_NO_MEM) {
+                ESP_LOGW(TAG, "Health queue failed: %s", esp_err_to_name(health_result));
+            }
+
+            bool status_queued = true;
+            esp_err_t session_status_result = ESP_OK;
+            if (initial_publish) {
+                session_status_result = vhos_transport_send_session_status();
+                status_queued = session_status_result == ESP_OK ||
+                                session_status_result == ESP_ERR_NOT_FOUND;
+                if (!status_queued && session_status_result != ESP_ERR_NO_MEM) {
+                    ESP_LOGW(
+                        TAG,
+                        "Unable to queue post-handshake status: %s",
+                        esp_err_to_name(session_status_result)
+                    );
+                }
+                ESP_LOGI(
+                    TAG,
+                    "BLE_SESSION_CONTROL_PUBLISH handle=%u epoch=%lu health_rc=%s "
+                    "status_rc=%s notification_count=%lu stack_high_water=%u",
+                    active_connection,
+                    (unsigned long)active_epoch,
+                    esp_err_to_name(health_result),
+                    esp_err_to_name(session_status_result),
+                    (unsigned long)notification_count,
+                    (unsigned int)uxTaskGetStackHighWaterMark(NULL)
+                );
+            }
+
+            if (initial_publish && (!health_queued || !status_queued)) {
+                portENTER_CRITICAL(&state_lock);
+                if (connection_handle == active_connection && connection_epoch == active_epoch &&
+                    link_encrypted && stream_notify_enabled && application_session_ready) {
+                    initial_session_publish_pending = true;
+                }
+                portEXIT_CRITICAL(&state_lock);
             }
         }
     }
@@ -331,13 +904,49 @@ static int gap_event(struct ble_gap_event *event, void *argument)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
+            struct ble_gap_conn_desc connect_description;
+            int connect_description_result = ble_gap_conn_find(
+                event->connect.conn_handle,
+                &connect_description
+            );
             portENTER_CRITICAL(&state_lock);
             connection_handle = event->connect.conn_handle;
-            link_encrypted = false;
+            /*
+             * NimBLE can restore encryption and bonded CCCDs before delivering GAP CONNECT.
+             * Preserve those event-derived subscription flags; DISCONNECT and boot already
+             * clear them for genuinely new links. Prefer the authoritative connection
+             * descriptor for encryption, while retaining a pre-CONNECT ENC_CHANGE result if
+             * descriptor lookup is momentarily unavailable.
+             */
+            if (connect_description_result == 0) {
+                link_encrypted = connect_description.sec_state.encrypted;
+            }
+            application_session_ready = false;
+            application_handshake_pending = false;
+            initial_session_publish_pending = false;
+            connection_epoch++;
             advertising_active = false;
             connection_parameters_available = false;
             active_att_mtu = 0;
+            bool effective_encrypted = link_encrypted;
+            bool effective_stream_notify = stream_notify_enabled;
+            bool effective_status_notify = status_notify_enabled;
+            bool effective_ota_notify = ota_status_notify_enabled;
             portEXIT_CRITICAL(&state_lock);
+            ESP_LOGI(
+                TAG,
+                "BLE_CONNECT_EFFECTIVE_STATE handle=%u descriptor_rc=%d encrypted=%u "
+                "stream_notify=%u status_notify=%u ota_notify=%u source=preserved-pre-connect",
+                event->connect.conn_handle,
+                connect_description_result,
+                effective_encrypted,
+                effective_stream_notify,
+                effective_status_notify,
+                effective_ota_notify
+            );
+            if (tx_queue != NULL) {
+                xQueueReset(tx_queue);
+            }
             if (connection_handle <= ESP_BLE_PWR_TYPE_CONN_HDL8) {
                 esp_err_t power_result = esp_ble_tx_power_set(
                     (esp_ble_power_type_t)connection_handle,
@@ -354,16 +963,37 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             log_connection_parameters(connection_handle, "INITIAL");
             request_stable_connection_parameters(connection_handle);
             ESP_LOGI(TAG, "IPHONE_LINK_CONNECTED handle=%u", connection_handle);
+            log_security_snapshot(connection_handle, "connected");
+            log_bond_store("connected");
+            schedule_security_start(connection_handle);
         } else {
             ESP_LOGW(TAG, "BLE connection attempt failed: status=%d", event->connect.status);
             schedule_advertising();
         }
         return 0;
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "IPHONE_LINK_DISCONNECTED reason=%d", event->disconnect.reason);
+    case BLE_GAP_EVENT_DISCONNECT: {
+        unsigned int hci_code = event->disconnect.reason > BLE_HS_ERR_HCI_BASE &&
+                                        event->disconnect.reason < BLE_HS_ERR_L2C_BASE
+                                    ? (unsigned int)(event->disconnect.reason -
+                                                     BLE_HS_ERR_HCI_BASE)
+                                    : 0U;
+        ESP_LOGI(
+            TAG,
+            "IPHONE_LINK_DISCONNECTED reason=%d status=%s hci_code=%u hci_name=%s",
+            event->disconnect.reason,
+            host_status_name(event->disconnect.reason),
+            hci_code,
+            hci_code == 0 ? "none" : hci_error_name(hci_code)
+        );
+        log_security_snapshot(event->disconnect.conn.conn_handle, "disconnecting");
+        log_bond_store("disconnecting");
         portENTER_CRITICAL(&state_lock);
         connection_handle = BLE_HS_CONN_HANDLE_NONE;
         link_encrypted = false;
+        application_session_ready = false;
+        application_handshake_pending = false;
+        initial_session_publish_pending = false;
+        connection_epoch++;
         stream_notify_enabled = false;
         status_notify_enabled = false;
         ota_status_notify_enabled = false;
@@ -373,9 +1003,13 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         active_connection_latency = 0;
         active_supervision_timeout = 0;
         portEXIT_CRITICAL(&state_lock);
+        if (tx_queue != NULL) {
+            xQueueReset(tx_queue);
+    }
         vhos_transport_reset();
         schedule_advertising();
         return 0;
+        }
     case BLE_GAP_EVENT_CONN_UPDATE:
         ESP_LOGI(TAG, "BLE_CONN_UPDATE status=%d", event->conn_update.status);
         if (event->conn_update.status == 0) {
@@ -407,24 +1041,174 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         portEXIT_CRITICAL(&state_lock);
         ESP_LOGI(
             TAG,
-            "BLE_SUBSCRIBE handle=%u notify=%d",
+            "BLE_SUBSCRIBE connection=%u handle=%u reason=%u reason_name=%s "
+            "notify=%u->%u indicate=%u->%u",
+            event->subscribe.conn_handle,
             event->subscribe.attr_handle,
-            event->subscribe.cur_notify
+            event->subscribe.reason,
+            subscribe_reason_name(event->subscribe.reason),
+            event->subscribe.prev_notify,
+            event->subscribe.cur_notify,
+            event->subscribe.prev_indicate,
+            event->subscribe.cur_indicate
         );
+        log_security_snapshot(event->subscribe.conn_handle, "subscription-change");
         return 0;
-    case BLE_GAP_EVENT_ENC_CHANGE:
+    case BLE_GAP_EVENT_ENC_CHANGE: {
+        struct ble_gap_conn_desc description;
+        int description_result = ble_gap_conn_find(
+            event->enc_change.conn_handle,
+            &description
+        );
+        bool encrypted = event->enc_change.status == 0 && description_result == 0 &&
+                         description.sec_state.encrypted;
         portENTER_CRITICAL(&state_lock);
-        link_encrypted = event->enc_change.status == 0;
+        link_encrypted = encrypted;
         portEXIT_CRITICAL(&state_lock);
-        ESP_LOGI(TAG, "BLE_ENCRYPTION status=%d", event->enc_change.status);
+        unsigned int sm_code = 0;
+        unsigned int hci_code = 0;
+        const char *sm_origin = "none";
+        if (event->enc_change.status > BLE_HS_ERR_SM_US_BASE &&
+            event->enc_change.status < BLE_HS_ERR_SM_PEER_BASE) {
+            sm_code = (unsigned int)(event->enc_change.status - BLE_HS_ERR_SM_US_BASE);
+            sm_origin = "local";
+        } else if (event->enc_change.status > BLE_HS_ERR_SM_PEER_BASE &&
+                   event->enc_change.status < BLE_HS_ERR_HW_BASE) {
+            sm_code = (unsigned int)(event->enc_change.status - BLE_HS_ERR_SM_PEER_BASE);
+            sm_origin = "peer";
+        } else if (event->enc_change.status > BLE_HS_ERR_HCI_BASE &&
+                   event->enc_change.status < BLE_HS_ERR_L2C_BASE) {
+            hci_code = (unsigned int)(event->enc_change.status - BLE_HS_ERR_HCI_BASE);
+        }
+        ESP_LOGI(
+            TAG,
+            "BLE_ENCRYPTION handle=%u status=%d status_name=%s sm_origin=%s "
+            "sm_code=%u sm_name=%s hci_code=%u hci_name=%s descriptor_rc=%d",
+            event->enc_change.conn_handle,
+            event->enc_change.status,
+            host_status_name(event->enc_change.status),
+            sm_origin,
+            sm_code,
+            sm_code == 0 ? "none" : sm_error_name(sm_code),
+            hci_code,
+            hci_code == 0 ? "none" : hci_error_name(hci_code),
+            description_result
+        );
+        log_security_snapshot(
+            event->enc_change.conn_handle,
+            event->enc_change.status == 0 ? "encryption-complete" : "encryption-failed"
+        );
+        log_bond_store(
+            event->enc_change.status == 0 ? "encryption-complete" : "encryption-failed"
+        );
+        if (event->enc_change.status == BLE_HS_ETIMEOUT && description_result == 0) {
+            /*
+             * NimBLE marks a timed-out Security Manager procedure as unusable for further SMP
+             * work on the same link. End that link immediately so Core Bluetooth can reconnect
+             * into a fresh, proactively secured session instead of waiting for HCI supervision.
+             */
+            int terminate_result = ble_gap_terminate(
+                event->enc_change.conn_handle,
+                BLE_ERR_REM_USER_CONN_TERM
+            );
+            ESP_LOGW(
+                TAG,
+                "BLE_SECURITY_RECOVERY action=terminate-tainted-link handle=%u rc=%d "
+                "failed_status=%d failed_status_name=%s",
+                event->enc_change.conn_handle,
+                terminate_result,
+                event->enc_change.status,
+                host_status_name(event->enc_change.status)
+            );
+        }
+        return 0;
+    }
+    case BLE_GAP_EVENT_PARING_COMPLETE:
+        ESP_LOGI(
+            TAG,
+            "BLE_PAIRING_COMPLETE handle=%u status=%d status_name=%s",
+            event->pairing_complete.conn_handle,
+            event->pairing_complete.status,
+            host_status_name(event->pairing_complete.status)
+        );
+        log_security_snapshot(
+            event->pairing_complete.conn_handle,
+            event->pairing_complete.status == 0 ? "pairing-complete" : "pairing-failed"
+        );
+        log_bond_store(
+            event->pairing_complete.status == 0 ? "pairing-complete" : "pairing-failed"
+        );
         return 0;
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         struct ble_gap_conn_desc description;
-        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &description) == 0) {
-            ble_store_util_delete_peer(&description.peer_id_addr);
+        int find_result = ble_gap_conn_find(event->repeat_pairing.conn_handle, &description);
+        ESP_LOGW(
+            TAG,
+            "BLE_REPEAT_PAIRING handle=%u find_rc=%d policy=delete-exact-peer-and-retry",
+            event->repeat_pairing.conn_handle,
+            find_result
+        );
+        log_security_snapshot(event->repeat_pairing.conn_handle, "repeat-pairing");
+        log_bond_store("before-repeat-pairing-delete");
+        if (find_result == 0) {
+            int delete_result = ble_store_util_delete_peer(&description.peer_id_addr);
+            ESP_LOGW(
+                TAG,
+                "BLE_REPEAT_PAIRING_DELETE peer_type=%u "
+                "peer=%02x:%02x:%02x:%02x:%02x:%02x rc=%d",
+                description.peer_id_addr.type,
+                description.peer_id_addr.val[5],
+                description.peer_id_addr.val[4],
+                description.peer_id_addr.val[3],
+                description.peer_id_addr.val[2],
+                description.peer_id_addr.val[1],
+                description.peer_id_addr.val[0],
+                delete_result
+            );
+            log_bond_store("after-repeat-pairing-delete");
+            if (delete_result == 0 || delete_result == BLE_HS_ENOENT) {
+                return BLE_GAP_REPEAT_PAIRING_RETRY;
+            }
         }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
+        ESP_LOGE(TAG, "BLE_REPEAT_PAIRING policy=ignore reason=exact-peer-delete-failed");
+        return BLE_GAP_REPEAT_PAIRING_IGNORE;
     }
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        ESP_LOGI(
+            TAG,
+            "BLE_PASSKEY_ACTION handle=%u action=%u action_name=%s numcmp=%lu "
+            "io_cap=no-input-no-output mitm=0 secure_connections=1",
+            event->passkey.conn_handle,
+            event->passkey.params.action,
+            passkey_action_name(event->passkey.params.action),
+            (unsigned long)event->passkey.params.numcmp
+        );
+        log_security_snapshot(event->passkey.conn_handle, "passkey-action");
+        if (event->passkey.params.action == BLE_SM_IOACT_NONE) {
+            return 0;
+        }
+        ESP_LOGE(
+            TAG,
+            "BLE_PASSKEY_ACTION rejected=unsupported-interactive-action action=%u",
+            event->passkey.params.action
+        );
+        return BLE_HS_ENOTSUP;
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED:
+        ESP_LOGI(
+            TAG,
+            "BLE_IDENTITY_RESOLVED handle=%u peer_type=%u "
+            "peer=%02x:%02x:%02x:%02x:%02x:%02x",
+            event->identity_resolved.conn_handle,
+            event->identity_resolved.peer_id_addr.type,
+            event->identity_resolved.peer_id_addr.val[5],
+            event->identity_resolved.peer_id_addr.val[4],
+            event->identity_resolved.peer_id_addr.val[3],
+            event->identity_resolved.peer_id_addr.val[2],
+            event->identity_resolved.peer_id_addr.val[1],
+            event->identity_resolved.peer_id_addr.val[0]
+        );
+        log_security_snapshot(event->identity_resolved.conn_handle, "identity-resolved");
+        return 0;
     default:
         return 0;
     }
@@ -500,12 +1284,21 @@ static void on_reset(int reason)
     advertising_active = false;
     connection_handle = BLE_HS_CONN_HANDLE_NONE;
     link_encrypted = false;
+    application_session_ready = false;
+    application_handshake_pending = false;
+    initial_session_publish_pending = false;
+    connection_epoch++;
     stream_notify_enabled = false;
     status_notify_enabled = false;
     ota_status_notify_enabled = false;
     connection_parameters_available = false;
     active_att_mtu = 0;
     portEXIT_CRITICAL(&state_lock);
+    if (tx_queue != NULL) {
+        xQueueReset(tx_queue);
+    }
+    vhos_transport_reset();
+    ESP_LOGI(TAG, "BLE_HOST_EPOCH_CLEARED reason=%d rx=reset tx=reset", reason);
     ESP_LOGE(TAG, "NimBLE reset: reason=%d", reason);
 }
 
@@ -534,6 +1327,19 @@ static esp_err_t persist_gatt_schema(nvs_handle_t handle)
         result = nvs_commit(handle);
     }
     return result;
+}
+
+static bool gatt_schema_preserves_bond(uint32_t stored_schema)
+{
+    /*
+     * Epoch 2 and epoch 6 register the same services, UUIDs, characteristic order,
+     * properties, encrypted permissions, and CCCDs. Epoch 6 was advanced while
+     * diagnosing application/session behavior, not because the attribute database
+     * changed. Keep this allowlist explicit; unknown epochs still fail over to the
+     * one-time identity/bond migration below.
+     */
+    return stored_schema == VHOS_BLE_GATT_SCHEMA_VERSION ||
+           stored_schema == VHOS_BLE_GATT_SCHEMA_BOND_COMPATIBLE_VERSION;
 }
 
 static esp_err_t generate_and_persist_identity(
@@ -583,10 +1389,22 @@ static esp_err_t configure_persistent_identity(void)
         VHOS_BLE_GATT_SCHEMA_KEY,
         &stored_gatt_schema
     );
+    bool compatible_schema_upgrade = identity_present &&
+        schema_result == ESP_OK &&
+        stored_gatt_schema != VHOS_BLE_GATT_SCHEMA_VERSION &&
+        gatt_schema_preserves_bond(stored_gatt_schema);
     bool gatt_schema_changed = identity_present &&
-        (schema_result != ESP_OK || stored_gatt_schema != VHOS_BLE_GATT_SCHEMA_VERSION);
+        (schema_result != ESP_OK || !gatt_schema_preserves_bond(stored_gatt_schema));
     bool generated = false;
-    if (gatt_schema_changed) {
+    if (compatible_schema_upgrade) {
+        ESP_LOGI(
+            TAG,
+            "BLE_GATT_SCHEMA_MIGRATION stored=%lu current=%u "
+            "compatibility=verified-identical-db action=preserve-identity-preserve-bonds",
+            (unsigned long)stored_gatt_schema,
+            VHOS_BLE_GATT_SCHEMA_VERSION
+        );
+    } else if (gatt_schema_changed) {
         ESP_LOGW(
             TAG,
             "BLE_GATT_SCHEMA_MIGRATION stored=%lu current=%u action=rotate-identity-clear-bonds",
@@ -750,6 +1568,16 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
         ESP_LOGE(TAG, "Unable to initialize BLE advertising retry: rc=%d", callout_result);
         return ESP_FAIL;
     }
+    callout_result = ble_npl_callout_init(
+        &security_start_callout,
+        nimble_port_get_dflt_eventq(),
+        security_start_event,
+        NULL
+    );
+    if (callout_result != 0) {
+        ESP_LOGE(TAG, "Unable to initialize BLE security start: rc=%d", callout_result);
+        return ESP_FAIL;
+    }
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -775,34 +1603,21 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
     }
 
     ble_store_config_init();
-    int our_security_records = 0;
-    int peer_security_records = 0;
-    int our_store_result = ble_store_util_count(
-        BLE_STORE_OBJ_TYPE_OUR_SEC,
-        &our_security_records
-    );
-    int peer_store_result = ble_store_util_count(
-        BLE_STORE_OBJ_TYPE_PEER_SEC,
-        &peer_security_records
-    );
-    if (our_store_result == 0 && peer_store_result == 0) {
-        ESP_LOGI(
-            TAG,
-            "BLE_BOND_STORE our_security_records=%d peer_security_records=%d",
-            our_security_records,
-            peer_security_records
-        );
-    } else {
-        ESP_LOGW(
-            TAG,
-            "Unable to inspect BLE bond store: our_rc=%d peer_rc=%d",
-            our_store_result,
-            peer_store_result
-        );
-    }
+    log_bond_store("boot");
     nimble_port_freertos_init(host_task);
-    if (xTaskCreate(tx_task, "vhos_ble_tx", 4096, NULL, 6, NULL) != pdPASS ||
-        xTaskCreate(health_task, "vhos_health", 6144, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(
+            health_task,
+            "vhos_health",
+            6144,
+            NULL,
+            5,
+            &health_task_handle
+        ) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(tx_task, "vhos_ble_tx", 4096, NULL, 6, NULL) != pdPASS) {
+        vTaskDelete(health_task_handle);
+        health_task_handle = NULL;
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -827,8 +1642,8 @@ esp_err_t vhos_ble_get_health(vhos_ble_health_t *health)
     health->connected = connection_handle != BLE_HS_CONN_HANDLE_NONE;
     health->encrypted = link_encrypted;
     health->stream_subscribed = stream_notify_enabled;
-    health->health_subscribed = status_notify_enabled;
-    health->ota_subscribed = ota_status_notify_enabled;
+    health->health_subscribed = stream_notify_enabled;
+    health->ota_subscribed = stream_notify_enabled;
     health->connection_parameters_available = connection_parameters_available;
     health->att_mtu = active_att_mtu;
     health->connection_interval_units = active_connection_interval;

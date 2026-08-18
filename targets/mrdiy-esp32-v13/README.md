@@ -56,6 +56,43 @@ Firmware `v0.1.0-dev.14` adopts the stable owner-facing name
 `VHOS-4R-OBD-<MAC-suffix>`. It does not change the persisted BLE identity, bonds, complete
 handshake `gateway_id`, or existing evidence lineage.
 
+Firmware `v0.1.0-dev.23` makes bonded reconnect deterministic across NimBLE's legal
+pre-`CONNECT` restoration ordering. Encryption, pairing completion, and the persisted stream CCCD
+can be restored before the GAP connect callback. The callback preserves those facts, derives the
+effective encryption state from the live connection descriptor, and skips a redundant security
+procedure on an already encrypted bond. Fresh unencrypted links still initiate Secure Connections
+pairing. Physical iPhone validation passed the restored data path and two explicit saved-identity
+Reconnects without another Pair sheet; endurance and power/range recovery remain separate gates.
+See [dev23 bonded-reconnect validation](docs/FIELD-VALIDATION-2026-08-17-DEV23.md).
+
+Firmware `v0.1.0-dev.24` makes the application-session gate depend on a complete, CRC-valid
+`gateway.handshake.request` whose handshake and initial health responses were queued. Buffering a
+partial header or payload can no longer unlock periodic health. It also preserves identity, bond,
+and stored CCCDs while migrating the independently audited, attribute-identical GATT epoch `2` to
+epoch `6`; unknown or genuinely incompatible epochs retain the conservative rotation behavior.
+See [dev24 transport and GATT review closure](docs/FIELD-VALIDATION-2026-08-17-DEV24.md).
+
+Firmware `v0.1.0-dev.25` enforces that gate at outbound queue admission and again before every BLE
+notification chunk. Before the application handshake completes, the only permitted outbound
+frame is the typed bootstrap handshake response, and it can be queued only while the exact
+connection is encrypted with its stream CCCD active. The TX task binds that response to its
+admission connection epoch and opens the session only after every notification chunk returns
+success in that same epoch. Initial and periodic health, live CAN, capture, and OTA are all
+session-required. NimBLE host reset clears both incremental RX and queued TX state so no partial
+command or frame crosses a host epoch. See
+[dev25 delivery-gate validation](docs/FIELD-VALIDATION-2026-08-17-DEV25.md).
+
+Firmware `v0.1.0-dev.26` keeps the BLE TX task limited to notification delivery and the atomic
+session-state transition. Physical dev25 UART evidence showed that building initial health and OTA
+status directly on its 4 KB stack overflowed immediately after readiness. Dev26 records a pending
+control publish and wakes the existing 6 KB health task, which queues initial health/status and
+reports its stack high-water mark. The same session and connection-epoch gates remain enforced.
+Physical USB-bench acceptance then reused the saved iPhone bond, verified dev26, sustained health
+for more than two minutes without a reboot, and automatically reconnected/reverified after a Mac
+chip-id hard reset—without Pair, Forget, or NVS erase. Zero CAN frames are expected because the
+bench gateway was not attached to the vehicle.
+See [dev26 deferred-control validation](docs/FIELD-VALIDATION-2026-08-17-DEV26.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
@@ -103,8 +140,10 @@ Design, evidence, security, and operator rationale are maintained alongside the 
   owner-facing alias; the complete handshake `gateway_id` remains the immutable evidence identity.
 - Advertising and default connection transmit power are set to the classic ESP32's supported
   +9 dBm level.
-- Evidence, health, and OTA notification subscriptions require an encrypted BLE link. On Apple
-  platforms, subscribing initiates system pairing before the versioned handshake is sent.
+- Evidence, health, and OTA are self-describing framed messages multiplexed over one encrypted
+  stream notification characteristic and one physical CCCD. On a fresh Apple connection, the
+  gateway proactively initiates Secure Connections pairing before the versioned handshake. A
+  bonded reconnect restores encryption and the stream CCCD without another owner prompt.
 - The gateway uses a random-static BLE identity persisted in NVS. Normal reboots, application-only
   flashes, and OTA preserve both that identity and the bond. A full NVS erase removes both, so the
   next boot creates a new identity and iOS treats the gateway as a new peripheral instead of
@@ -116,15 +155,27 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 - Boot evidence reports both the identity source (`generated` or `persisted`) and the real NimBLE
   bond-record counts. An identity is never used until it has been committed to NVS; failure to
   persist it leaves BLE unavailable rather than changing the address on every reboot.
-- The NimBLE host uses an 8 KiB task stack. Encryption plus simultaneous evidence, health, and OTA
-  subscriptions exceeded the ESP-IDF default 4 KiB stack during physical commissioning; the
-  resulting watchdog reboot looked like a bond failure even though both bond records persisted.
+- The NimBLE host uses an 8 KiB task stack. Before outbound frames were multiplexed over one stream
+  CCCD, encryption plus simultaneous evidence, health, and OTA subscriptions exceeded the ESP-IDF
+  default 4 KiB stack during physical commissioning; the resulting watchdog reboot looked like a
+  bond failure even though both bond records persisted.
 - Large framed notifications are paced and briefly retry controller-buffer allocation, including
   while the connection is still using the 23-byte default ATT MTU.
 - The peripheral requests a 30–50 ms connection interval, zero peripheral latency, and a six-second
   supervision timeout. Negotiated values are logged for physical reconnect diagnosis.
 - Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;
   it does not create an unsupervised FreeRTOS retry task.
+- NimBLE may emit pairing, encryption, and `reason=bond-restore` subscription events before GAP
+  `CONNECT`. The connect callback preserves those restored flags. It never starts a second security
+  procedure when the live descriptor already reports `encrypted=1`; disconnect, host reset, and
+  cold boot remain the only normal boundaries that clear in-memory subscription state.
+- Application readiness is separate from ATT write success. A fragmented command remains pending
+  until the complete frame passes both CRCs, the request contract and version are allowlisted, and
+  every handshake-response notification chunk succeeds in the same connection epoch.
+- The outbound queue carries an explicit scope and its admission connection epoch. Only the
+  correctly typed handshake bootstrap frame may bypass the session gate; initial health and every
+  other frame require connection, encryption, stream subscription, and application readiness at
+  both enqueue and delivery time.
 
 ## Build
 

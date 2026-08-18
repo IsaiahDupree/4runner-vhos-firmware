@@ -98,7 +98,8 @@ static esp_err_t send_payload(
     uint8_t message_type,
     const uint8_t *payload,
     size_t payload_length,
-    vhos_transport_channel_t channel
+    vhos_transport_channel_t channel,
+    vhos_transport_emit_scope_t scope
 )
 {
     if (emit_frame == NULL || (payload == NULL && payload_length > 0) || send_lock == NULL) {
@@ -124,7 +125,12 @@ static esp_err_t send_payload(
     if (payload_length > 0) {
         memcpy(&frame[VHOS_HEADER_BYTES], payload, payload_length);
     }
-    esp_err_t result = emit_frame(frame, VHOS_HEADER_BYTES + payload_length, channel);
+    esp_err_t result = emit_frame(
+        frame,
+        VHOS_HEADER_BYTES + payload_length,
+        channel,
+        scope
+    );
     xSemaphoreGive(send_lock);
     return result;
 }
@@ -132,7 +138,8 @@ static esp_err_t send_payload(
 static esp_err_t send_json(
     uint8_t message_type,
     const char *payload,
-    vhos_transport_channel_t channel
+    vhos_transport_channel_t channel,
+    vhos_transport_emit_scope_t scope
 )
 {
     if (payload == NULL) {
@@ -142,7 +149,8 @@ static esp_err_t send_json(
         message_type,
         (const uint8_t *)payload,
         strlen(payload),
-        channel
+        channel,
+        scope
     );
 }
 
@@ -159,7 +167,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.14\","
+        "\"firmware_version\":\"0.1.0-dev.26\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -177,23 +185,28 @@ static esp_err_t send_handshake(void)
     esp_err_t result = send_json(
         VHOS_MESSAGE_HANDSHAKE,
         payload,
-        VHOS_TRANSPORT_CHANNEL_STREAM
+        VHOS_TRANSPORT_CHANNEL_STREAM,
+        VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE
     );
-    if (result == ESP_OK) {
-        esp_err_t status_result = vhos_ota_wifi_send_last_status();
-        if (status_result != ESP_OK && status_result != ESP_ERR_NOT_FOUND) {
-            return status_result;
-        }
-    }
     return result;
 }
 
 esp_err_t vhos_transport_send_ota_status(const char *json)
 {
-    return send_json(VHOS_MESSAGE_OTA_CONTROL, json, VHOS_TRANSPORT_CHANNEL_OTA);
+    return send_json(
+        VHOS_MESSAGE_OTA_CONTROL,
+        json,
+        VHOS_TRANSPORT_CHANNEL_OTA,
+        VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
+    );
 }
 
-esp_err_t vhos_transport_send_health(void)
+esp_err_t vhos_transport_send_session_status(void)
+{
+    return vhos_ota_wifi_send_last_status();
+}
+
+static esp_err_t send_health(vhos_transport_emit_scope_t scope)
 {
     vhos_can_health_t health = {0};
     esp_err_t can_result = vhos_can_get_health(&health);
@@ -266,8 +279,14 @@ esp_err_t vhos_transport_send_health(void)
     return send_json(
         VHOS_MESSAGE_GATEWAY_HEALTH,
         payload,
-        VHOS_TRANSPORT_CHANNEL_HEALTH
+        VHOS_TRANSPORT_CHANNEL_HEALTH,
+        scope
     );
+}
+
+esp_err_t vhos_transport_send_health(void)
+{
+    return send_health(VHOS_TRANSPORT_EMIT_SESSION_REQUIRED);
 }
 
 static esp_err_t send_capture_log_index(void)
@@ -312,7 +331,8 @@ static esp_err_t send_capture_log_index(void)
     return send_json(
         VHOS_MESSAGE_CAPTURE_LOG_INDEX,
         payload,
-        VHOS_TRANSPORT_CHANNEL_STREAM
+        VHOS_TRANSPORT_CHANNEL_STREAM,
+        VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
     );
 }
 
@@ -357,7 +377,8 @@ static esp_err_t send_capture_log_chunk(uint8_t slot, uint32_t offset)
         VHOS_MESSAGE_CAPTURE_LOG_CHUNK,
         payload,
         VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES + data_length,
-        VHOS_TRANSPORT_CHANNEL_STREAM
+        VHOS_TRANSPORT_CHANNEL_STREAM,
+        VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
     );
 }
 
@@ -393,7 +414,8 @@ static void send_live_can_observation(
         VHOS_MESSAGE_RAW_CAN_FRAME,
         payload,
         sizeof(payload),
-        VHOS_TRANSPORT_CHANNEL_STREAM
+        VHOS_TRANSPORT_CHANNEL_STREAM,
+        VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
     );
 }
 
@@ -475,8 +497,50 @@ static esp_err_t process_ota_control(const uint8_t *payload, size_t payload_leng
 #endif
 }
 
-static esp_err_t process_frame(const uint8_t *frame, size_t length)
+static bool valid_handshake_request(const uint8_t *payload, size_t payload_length)
 {
+    if (payload == NULL || payload_length == 0 || payload_length > VHOS_MAX_PAYLOAD_BYTES) {
+        return false;
+    }
+
+    char json[VHOS_MAX_PAYLOAD_BYTES + 1];
+    memcpy(json, payload, payload_length);
+    json[payload_length] = '\0';
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(
+        json,
+        payload_length + 1,
+        &parse_end,
+        true
+    );
+    char contract[48];
+    char contract_version[16];
+    bool valid = cJSON_IsObject(root) &&
+                 parse_end == &json[payload_length] &&
+                 copy_json_string(root, "contract", contract, sizeof(contract)) &&
+                 copy_json_string(
+                     root,
+                     "contract_version",
+                     contract_version,
+                     sizeof(contract_version)
+                 ) &&
+                 strcmp(contract, "gateway.handshake.request") == 0 &&
+                 strcmp(contract_version, "1.0.0") == 0;
+    cJSON_Delete(root);
+    return valid;
+}
+
+static esp_err_t process_frame(
+    const uint8_t *frame,
+    size_t length,
+    bool session_ready,
+    bool *handshake_accepted
+)
+{
+    if (handshake_accepted == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *handshake_accepted = false;
     if (length < VHOS_HEADER_BYTES || memcmp(frame, "VHOS", 4) != 0 || frame[4] != 1) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -490,8 +554,22 @@ static esp_err_t process_frame(const uint8_t *frame, size_t length)
     }
 
     if (frame[6] == VHOS_MESSAGE_HANDSHAKE) {
+        if (session_ready) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!valid_handshake_request(&frame[VHOS_HEADER_BYTES], payload_length)) {
+            return ESP_ERR_INVALID_ARG;
+        }
         esp_err_t result = send_handshake();
-        return result == ESP_OK ? vhos_transport_send_health() : result;
+        if (result == ESP_OK) {
+            *handshake_accepted = true;
+        }
+        return result;
+    }
+
+    /* No application command is accepted until TX proves handshake delivery. */
+    if (!session_ready) {
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (frame[6] == VHOS_MESSAGE_OTA_CONTROL) {
@@ -549,8 +627,17 @@ void vhos_transport_reset(void)
     memset(rx_buffer, 0, sizeof(rx_buffer));
 }
 
-esp_err_t vhos_transport_ingest(const uint8_t *data, size_t length)
+esp_err_t vhos_transport_ingest(
+    const uint8_t *data,
+    size_t length,
+    bool session_ready,
+    vhos_transport_ingest_result_t *ingest_result
+)
 {
+    if (ingest_result == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *ingest_result = (vhos_transport_ingest_result_t){0};
     if (data == NULL || length == 0 || length > sizeof(rx_buffer) - rx_length) {
         vhos_transport_reset();
         return ESP_ERR_INVALID_SIZE;
@@ -573,7 +660,13 @@ esp_err_t vhos_transport_ingest(const uint8_t *data, size_t length)
             return ESP_OK;
         }
 
-        esp_err_t result = process_frame(rx_buffer, frame_length);
+        bool frame_accepted_handshake = false;
+        esp_err_t result = process_frame(
+            rx_buffer,
+            frame_length,
+            session_ready,
+            &frame_accepted_handshake
+        );
         size_t remaining = rx_length - frame_length;
         if (remaining > 0) {
             memmove(rx_buffer, &rx_buffer[frame_length], remaining);
@@ -582,6 +675,8 @@ esp_err_t vhos_transport_ingest(const uint8_t *data, size_t length)
         if (result != ESP_OK) {
             return result;
         }
+        ingest_result->completed_frames++;
+        ingest_result->handshake_accepted |= frame_accepted_handshake;
     }
     return ESP_OK;
 }
