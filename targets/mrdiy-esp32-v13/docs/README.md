@@ -30,6 +30,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev30 passive J1979 evidence](FIELD-VALIDATION-2026-08-18-DEV30.md) | Passive Mode 01 response recognition, exact binary evidence contract, default-deny supported-PID request planner, build identity, and physical validation boundary. |
 | [dev31 live-capture/export isolation](FIELD-VALIDATION-2026-08-18-DEV31.md) | In-vehicle concurrent-export failure, firmware-enforced recorder quiescence, runtime-only health status, smaller export chunks, reset-reason evidence, exact artifact, and remaining field gates. |
 | [dev32 acquisition-quality foundation](FIELD-VALIDATION-2026-08-18-DEV32.md) | Dev31 vehicle baseline, two-stage receive pipeline, loss attribution contract, history-transfer recovery, exact unsigned artifact, and physical acceptance gates. |
+| [dev34 BLE transfer-load hardening](FIELD-VALIDATION-2026-08-18-DEV34.md) | Bounded notification backpressure, frame-boundary recovery, smaller history chunks, stream arbitration, exact unsigned artifact, device-free replay coverage, and remaining physical gates. |
 
 ## Governing rule
 
@@ -145,3 +146,11 @@ missed frames, hardware overruns, driver-queue pressure, observer-queue pressure
 retention-policy sampling/storage outcomes independently. Stopping the recorder for an approved
 history transfer records a reason; an interrupted BLE session automatically resumes recording,
 whereas an OTA pause remains paused by policy. Physical vehicle acceptance remains pending.
+
+`v0.1.0-dev.34` makes bulk history delivery a bounded, observable stream owner. It paces every
+notification, retries only transient NimBLE resource-pressure responses, and closes the exact
+connection epoch when a partial logical frame cannot be completed. Five-record history chunks and
+periodic-health suppression reduce competing notification demand. Increased NimBLE transport
+buffer counts and a longer requested supervision window add margin without changing listen-only
+CAN authority. The exact build passes device-free replay and host-side build gates; sustained
+physical history transfer remains a separate acceptance requirement.

@@ -28,7 +28,7 @@
 #define VHOS_MESSAGE_CAPTURE_LOG_CHUNK 13U
 #define VHOS_CAPTURE_LOG_REQUEST_BYTES 8U
 #define VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES 16U
-#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 12U
+#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 5U
 #define VHOS_CAPTURE_EXPORT_QUEUE_DEPTH 1U
 #define VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES 6144U
 #define VHOS_J1979_QUEUE_DEPTH 16U
@@ -76,6 +76,7 @@ static bool can_observer_registered;
 static bool j1979_observer_registered;
 static uint32_t session_generation;
 static portMUX_TYPE live_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE capture_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t last_live_can_us;
 static uint64_t j1979_queue_drops;
 static uint8_t capture_pause_reason;
@@ -194,7 +195,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.32\","
+        "\"firmware_version\":\"0.1.0-dev.34\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -793,9 +794,11 @@ static esp_err_t process_frame(
         if (operation == 3 || operation == 4) {
             esp_err_t result = vhos_capture_store_set_logging(operation == 4);
             if (result == ESP_OK) {
+                portENTER_CRITICAL(&capture_state_lock);
                 capture_pause_reason = operation == 4
                     ? VHOS_CAPTURE_PAUSE_REASON_NONE
                     : payload[2];
+                portEXIT_CRITICAL(&capture_state_lock);
             }
             return result == ESP_OK ? send_capture_log_index() : result;
         }
@@ -882,7 +885,11 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
 
 void vhos_transport_reset(void)
 {
-    if (capture_pause_reason == VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER) {
+    portENTER_CRITICAL(&capture_state_lock);
+    bool history_transfer_active =
+        capture_pause_reason == VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER;
+    portEXIT_CRITICAL(&capture_state_lock);
+    if (history_transfer_active) {
         esp_err_t resume_result = vhos_capture_store_set_logging(true);
         ESP_LOGW(
             TAG,
@@ -890,7 +897,9 @@ void vhos_transport_reset(void)
             esp_err_to_name(resume_result)
         );
         if (resume_result == ESP_OK) {
+            portENTER_CRITICAL(&capture_state_lock);
             capture_pause_reason = VHOS_CAPTURE_PAUSE_REASON_NONE;
+            portEXIT_CRITICAL(&capture_state_lock);
         }
     }
     if (session_lock != NULL && xSemaphoreTake(session_lock, portMAX_DELAY) == pdTRUE) {
@@ -910,6 +919,14 @@ void vhos_transport_reset(void)
     session_generation++;
     rx_length = 0;
     memset(rx_buffer, 0, sizeof(rx_buffer));
+}
+
+bool vhos_transport_history_transfer_active(void)
+{
+    portENTER_CRITICAL(&capture_state_lock);
+    bool active = capture_pause_reason == VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER;
+    portEXIT_CRITICAL(&capture_state_lock);
+    return active;
 }
 
 esp_err_t vhos_transport_ingest(

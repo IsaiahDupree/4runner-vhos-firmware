@@ -41,3 +41,4 @@ esp_err_t vhos_transport_ingest(
 esp_err_t vhos_transport_send_health(void);
 esp_err_t vhos_transport_send_ota_status(const char *json);
 esp_err_t vhos_transport_send_session_status(void);
+bool vhos_transport_history_transfer_active(void);

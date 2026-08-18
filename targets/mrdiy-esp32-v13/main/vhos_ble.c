@@ -28,13 +28,15 @@
 #define VHOS_BLE_FRAME_HEADER_BYTES 36U
 #define VHOS_BLE_FRAME_MESSAGE_HANDSHAKE 1U
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
-#define VHOS_BLE_NOTIFICATION_PACE_MS 15U
-#define VHOS_BLE_MBUF_RETRY_LIMIT 20U
+#define VHOS_BLE_NOTIFICATION_PACE_MS 50U
+#define VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS 50U
+#define VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT 80U
 #define VHOS_BLE_SECURITY_START_DELAY_MS 150U
 #define VHOS_BLE_CONN_INTERVAL_MIN 24U
-#define VHOS_BLE_CONN_INTERVAL_MAX 40U
+#define VHOS_BLE_CONN_INTERVAL_MAX 36U
 #define VHOS_BLE_CONN_LATENCY 0U
-#define VHOS_BLE_SUPERVISION_TIMEOUT 600U
+/* 30-45 ms and 18 s follow current Apple accessory guidance for resilient links. */
+#define VHOS_BLE_SUPERVISION_TIMEOUT 1800U
 #define VHOS_BLE_IDENTITY_NAMESPACE "vhos_ble_id"
 #define VHOS_BLE_IDENTITY_KEY "identity_v1"
 #define VHOS_BLE_GATT_SCHEMA_KEY "gatt_schema"
@@ -113,8 +115,14 @@ static const char *host_status_name(int status)
         return "success";
     case BLE_HS_EALREADY:
         return "already-in-progress";
+    case BLE_HS_EAGAIN:
+        return "try-again";
+    case BLE_HS_ENOMEM:
+        return "notification-buffer-exhausted";
     case BLE_HS_ENOTCONN:
         return "not-connected";
+    case BLE_HS_EBUSY:
+        return "busy";
     case BLE_HS_ETIMEOUT:
         return "host-procedure-timeout";
     case BLE_HS_EAUTHEN:
@@ -728,6 +736,143 @@ static esp_err_t emit_frame(
     return ESP_ERR_NO_MEM;
 }
 
+static bool notify_chunk_with_backpressure(
+    const vhos_ble_tx_item_t *item,
+    uint16_t value_handle,
+    const uint8_t *data,
+    size_t length,
+    size_t offset,
+    int *last_result
+)
+{
+    int result = BLE_HS_ENOMEM;
+    for (unsigned int attempt = 0; attempt < VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT; ++attempt) {
+        portENTER_CRITICAL(&state_lock);
+        bool current = tx_item_authorized_locked(item);
+        portEXIT_CRITICAL(&state_lock);
+        if (!current) {
+            if (last_result != NULL) {
+                *last_result = BLE_HS_ENOTCONN;
+            }
+            return false;
+        }
+
+        struct os_mbuf *packet = os_msys_get_pkthdr(length, 0);
+        if (packet == NULL) {
+            result = BLE_HS_ENOMEM;
+        } else if (os_mbuf_append(packet, data, length) != 0) {
+            os_mbuf_free_chain(packet);
+            if (last_result != NULL) {
+                *last_result = BLE_HS_EMSGSIZE;
+            }
+            ESP_LOGE(
+                TAG,
+                "BLE_NOTIFY_BUILD_FAILED scope=%s handle=%u epoch=%lu offset=%u",
+                emit_scope_name(item->scope),
+                item->connection_handle,
+                (unsigned long)item->connection_epoch,
+                (unsigned int)offset
+            );
+            return false;
+        } else {
+            /* NimBLE consumes packet on both success and failure. */
+            result = ble_gatts_notify_custom(item->connection_handle, value_handle, packet);
+            if (result == 0) {
+                if (attempt > 0) {
+                    ESP_LOGI(
+                        TAG,
+                        "BLE_NOTIFY_BACKPRESSURE_RECOVERED scope=%s handle=%u epoch=%lu "
+                        "offset=%u retries=%u",
+                        emit_scope_name(item->scope),
+                        item->connection_handle,
+                        (unsigned long)item->connection_epoch,
+                        (unsigned int)offset,
+                        attempt
+                    );
+                }
+                if (last_result != NULL) {
+                    *last_result = 0;
+                }
+                return true;
+            }
+        }
+
+        if (result != BLE_HS_ENOMEM && result != BLE_HS_EBUSY &&
+            result != BLE_HS_EAGAIN) {
+            break;
+        }
+        if (attempt == 0) {
+            ESP_LOGW(
+                TAG,
+                "BLE_NOTIFY_BACKPRESSURE scope=%s handle=%u epoch=%lu offset=%u rc=%d "
+                "rc_name=%s policy=bounded-retry",
+                emit_scope_name(item->scope),
+                item->connection_handle,
+                (unsigned long)item->connection_epoch,
+                (unsigned int)offset,
+                result,
+                host_status_name(result)
+            );
+        }
+        vTaskDelay(pdMS_TO_TICKS(VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS));
+    }
+
+    if (last_result != NULL) {
+        *last_result = result;
+    }
+    ESP_LOGE(
+        TAG,
+        "BLE_NOTIFY_BACKPRESSURE_EXHAUSTED scope=%s handle=%u epoch=%lu offset=%u rc=%d "
+        "rc_name=%s retries=%u",
+        emit_scope_name(item->scope),
+        item->connection_handle,
+        (unsigned long)item->connection_epoch,
+        (unsigned int)offset,
+        result,
+        host_status_name(result),
+        VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT
+    );
+    return false;
+}
+
+static void terminate_failed_notification_epoch(
+    const vhos_ble_tx_item_t *item,
+    size_t delivered_bytes,
+    int result
+)
+{
+    portENTER_CRITICAL(&state_lock);
+    bool same_epoch = item != NULL && connection_handle == item->connection_handle &&
+                      connection_epoch == item->connection_epoch;
+    if (same_epoch) {
+        application_session_ready = false;
+        application_handshake_pending = false;
+        initial_session_publish_pending = false;
+    }
+    portEXIT_CRITICAL(&state_lock);
+    if (!same_epoch) {
+        return;
+    }
+    if (tx_queue != NULL) {
+        xQueueReset(tx_queue);
+    }
+    int terminate_result = ble_gap_terminate(
+        item->connection_handle,
+        BLE_ERR_REM_USER_CONN_TERM
+    );
+    ESP_LOGE(
+        TAG,
+        "BLE_NOTIFY_EPOCH_TERMINATED handle=%u epoch=%lu delivered=%u rc=%d rc_name=%s "
+        "terminate_rc=%d reason=preserve-frame-boundary",
+        item->connection_handle,
+        (unsigned long)item->connection_epoch,
+        (unsigned int)delivered_bytes,
+        result,
+        host_status_name(result),
+        terminate_result
+    );
+}
+
 static void tx_task(void *argument)
 {
     (void)argument;
@@ -779,45 +924,17 @@ static void tx_task(void *argument)
             }
             size_t remaining = item.length - offset;
             size_t chunk_length = remaining < maximum_chunk ? remaining : maximum_chunk;
-            struct os_mbuf *packet = NULL;
-            for (unsigned int attempt = 0; attempt < VHOS_BLE_MBUF_RETRY_LIMIT; ++attempt) {
-                packet = os_msys_get_pkthdr(chunk_length, 0);
-                if (packet != NULL) {
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            if (packet == NULL) {
-                ESP_LOGE(TAG, "Unable to allocate BLE notification packet after retries");
+            int notify_result = 0;
+            if (!notify_chunk_with_backpressure(
+                    &item,
+                    value_handle,
+                    &item.data[offset],
+                    chunk_length,
+                    offset,
+                    &notify_result
+                )) {
                 delivery_complete = false;
-                break;
-            }
-            if (os_mbuf_append(packet, &item.data[offset], chunk_length) != 0) {
-                os_mbuf_free_chain(packet);
-                ESP_LOGE(TAG, "Unable to append BLE notification packet");
-                delivery_complete = false;
-                break;
-            }
-            portENTER_CRITICAL(&state_lock);
-            bool delivery_still_authorized = tx_item_authorized_locked(&item);
-            portEXIT_CRITICAL(&state_lock);
-            if (!delivery_still_authorized) {
-                os_mbuf_free_chain(packet);
-                delivery_complete = false;
-                break;
-            }
-            int result = ble_gatts_notify_custom(active_connection, value_handle, packet);
-            if (result != 0) {
-                ESP_LOGW(
-                    TAG,
-                    "BLE_NOTIFY_FAILED scope=%s handle=%u epoch=%lu offset=%u rc=%d",
-                    emit_scope_name(item.scope),
-                    active_connection,
-                    (unsigned long)active_epoch,
-                    (unsigned int)offset,
-                    result
-                );
-                delivery_complete = false;
+                terminate_failed_notification_epoch(&item, delivered_bytes, notify_result);
                 break;
             }
             delivered_bytes += chunk_length;
@@ -877,6 +994,7 @@ static void tx_task(void *argument)
 static void health_task(void *argument)
 {
     (void)argument;
+    bool transfer_suppression_logged = false;
     while (true) {
         uint32_t notification_count = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
         portENTER_CRITICAL(&state_lock);
@@ -889,6 +1007,22 @@ static void health_task(void *argument)
             initial_session_publish_pending = false;
         }
         portEXIT_CRITICAL(&state_lock);
+        bool suppress_periodic_health = vhos_transport_history_transfer_active();
+        if (can_send && suppress_periodic_health && !initial_publish) {
+            if (!transfer_suppression_logged) {
+                ESP_LOGI(
+                    TAG,
+                    "BLE_PERIODIC_HEALTH_SUPPRESSED reason=history-transfer-active "
+                    "policy=reserve-notification-capacity"
+                );
+                transfer_suppression_logged = true;
+            }
+            continue;
+        }
+        if (!suppress_periodic_health && transfer_suppression_logged) {
+            ESP_LOGI(TAG, "BLE_PERIODIC_HEALTH_RESUMED reason=history-transfer-complete");
+            transfer_suppression_logged = false;
+        }
         if (can_send) {
             if (initial_publish) {
                 log_security_snapshot(active_connection, "application-session-ready");

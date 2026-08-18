@@ -139,6 +139,15 @@ high-water/drop counts, and the existing recorder sampling/storage counters inde
 history-transfer pause is flushed and automatically resumed if the BLE session ends. See
 [dev32 acquisition-quality foundation](docs/FIELD-VALIDATION-2026-08-18-DEV32.md).
 
+Firmware `v0.1.0-dev.34` hardens sustained BLE history transfer under controller-buffer pressure.
+Notifications are paced at 50 ms, retry only the NimBLE resource-pressure outcomes within a
+bounded window, and terminate a partially delivered connection epoch if delivery cannot recover;
+the next session therefore starts at a complete VHOS frame boundary. History chunks are limited
+to five retained CAN records, periodic health yields while a history transfer owns the stream, and
+normal health resumes afterward. The requested link envelope is 30–45 ms, zero peripheral latency,
+and an 18-second supervision timeout. See
+[dev34 BLE transfer-load hardening](docs/FIELD-VALIDATION-2026-08-18-DEV34.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
@@ -205,10 +214,13 @@ Design, evidence, security, and operator rationale are maintained alongside the 
   CCCD, encryption plus simultaneous evidence, health, and OTA subscriptions exceeded the ESP-IDF
   default 4 KiB stack during physical commissioning; the resulting watchdog reboot looked like a
   bond failure even though both bond records persisted.
-- Large framed notifications are paced and briefly retry controller-buffer allocation, including
-  while the connection is still using the 23-byte default ATT MTU.
-- The peripheral requests a 30–50 ms connection interval, zero peripheral latency, and a six-second
-  supervision timeout. Negotiated values are logged for physical reconnect diagnosis.
+- Large framed notifications are paced at 50 ms and retry only bounded resource-pressure results.
+  If a partially delivered frame exhausts that budget, the gateway closes that connection epoch so
+  a subsequent session cannot interpret a tail fragment as a new VHOS frame.
+- History transfer uses five-record chunks and reserves the stream by suppressing periodic health;
+  health resumes automatically after transfer completion or session recovery.
+- The peripheral requests a 30–45 ms connection interval, zero peripheral latency, and an
+  18-second supervision timeout. Negotiated values are logged for physical reconnect diagnosis.
 - Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;
   it does not create an unsupervised FreeRTOS retry task.
 - NimBLE may emit pairing, encryption, and `reason=bond-restore` subscription events before GAP
