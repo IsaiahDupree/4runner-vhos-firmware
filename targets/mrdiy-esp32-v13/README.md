@@ -11,7 +11,9 @@ image.
 - CAN TX: GPIO 5
 - CAN controller mode: forced `TWAI_MODE_LISTEN_ONLY`
 - Initial passive bus timing: 500 kbit/s, followed by bounded 500/250-kbit observation windows
-- No raw transmit, ELM327 command, or active diagnostic path is compiled into this target
+- No raw transmit, ELM327 command, or active diagnostic executor is compiled into this target.
+  Dev30 contains only a fixed supported-PID request *planner* whose safety predicates default deny;
+  no production caller can currently transmit its output.
 
 The pin assignment and 500 kbit/s factory default are traceable to the recovered
 device image and the upstream MrDIY CANaBus v1.3+ firmware. They do not, by
@@ -109,6 +111,16 @@ of three ESP execution losses and three connected app-process deaths; every cycl
 new physical link, exact dev29 handshake, and live health without Pair, Forget, NVS erase, or manual
 Connect. See
 [dev29 capture retention and fault acceptance](docs/FIELD-VALIDATION-2026-08-18-DEV29.md).
+
+Firmware `v0.1.0-dev.30` recognizes ISO 15765 single-frame positive Mode 01 responses on passive
+11-bit CAN traffic at exactly 500 or 250 kbit/s, preserves their ECU, capture session, source sequence, and gateway monotonic
+time, and emits a bounded versioned diagnostic-evidence record over the already authenticated BLE
+stream. The phone and Android head unit enumerate PID `00/20/40/...` bitmaps independently for
+each responding ECU and decode a pinned subset of standard values only after that ECU's
+continuation chain is complete. The firmware still runs TWAI in listen-only mode and cannot issue
+the request itself. A fixed functional-request planner exists for the future signed-plan,
+deterministic-PARKED path, but has no production executor or permissive caller. See
+[dev30 passive J1979 evidence](docs/FIELD-VALIDATION-2026-08-18-DEV30.md).
 
 ## Wi-Fi access-point status
 

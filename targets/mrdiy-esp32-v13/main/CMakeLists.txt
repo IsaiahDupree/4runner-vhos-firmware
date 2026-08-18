@@ -16,6 +16,7 @@ idf_component_register(
         "vhos_ble.c"
         "vhos_can.c"
         "vhos_capture_store.c"
+        "vhos_j1979.c"
         "vhos_ota_wifi.c"
         "vhos_status_web.c"
         "vhos_transport.c"

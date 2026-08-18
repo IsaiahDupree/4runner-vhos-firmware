@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "vhos_can.h"
 #include "vhos_capture_store.h"
+#include "vhos_j1979.h"
 #include "vhos_ota_wifi.h"
 
 #define VHOS_HEADER_BYTES 36U
@@ -18,6 +19,7 @@
 #define VHOS_MAX_FRAME_BYTES (VHOS_HEADER_BYTES + VHOS_MAX_PAYLOAD_BYTES)
 #define VHOS_MESSAGE_HANDSHAKE 1U
 #define VHOS_MESSAGE_RAW_CAN_FRAME 2U
+#define VHOS_MESSAGE_DIAGNOSTIC_RESPONSE 3U
 #define VHOS_MESSAGE_GATEWAY_HEALTH 4U
 #define VHOS_MESSAGE_OTA_CONTROL 8U
 #define VHOS_MESSAGE_CAPTURE_LOG_REQUEST 11U
@@ -28,6 +30,8 @@
 #define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 24U
 #define VHOS_CAPTURE_EXPORT_QUEUE_DEPTH 1U
 #define VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES 6144U
+#define VHOS_J1979_QUEUE_DEPTH 16U
+#define VHOS_J1979_TASK_STACK_BYTES 4096U
 #define VHOS_LIVE_CAN_INTERVAL_US 500000ULL
 
 #ifndef VHOS_BUILD_ID
@@ -63,10 +67,13 @@ static vhos_transport_emit_fn emit_frame;
 static SemaphoreHandle_t send_lock;
 static SemaphoreHandle_t session_lock;
 static QueueHandle_t capture_export_queue;
+static QueueHandle_t j1979_queue;
 static bool can_observer_registered;
+static bool j1979_observer_registered;
 static uint32_t session_generation;
 static portMUX_TYPE live_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t last_live_can_us;
+static uint64_t j1979_queue_drops;
 
 static uint32_t read_u32_le(const uint8_t *bytes)
 {
@@ -182,7 +189,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.29\","
+        "\"firmware_version\":\"0.1.0-dev.30\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -510,6 +517,69 @@ static void send_live_can_observation(
     );
 }
 
+static void queue_passive_j1979_response(
+    const vhos_can_observation_t *observation,
+    void *context
+)
+{
+    (void)context;
+    if (j1979_queue == NULL) {
+        return;
+    }
+    vhos_j1979_response_t response = {0};
+    if (!vhos_j1979_decode_passive_response(
+            observation,
+            vhos_capture_store_current_session_id(),
+            &response)) {
+        return;
+    }
+    if (xQueueSend(j1979_queue, &response, 0) != pdTRUE) {
+        j1979_queue_drops++;
+        ESP_LOGW(
+            TAG,
+            "J1979_PASSIVE_QUEUE_FULL drops=%llu ecu=0x%03lx pid=0x%02x",
+            (unsigned long long)j1979_queue_drops,
+            (unsigned long)response.ecu_identifier,
+            response.pid
+        );
+    }
+}
+
+static void j1979_task(void *argument)
+{
+    (void)argument;
+    vhos_j1979_response_t response;
+    while (true) {
+        if (xQueueReceive(j1979_queue, &response, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        uint8_t payload[36] = {0};
+        payload[0] = 1U;
+        payload[1] = (uint8_t)response.transport;
+        payload[2] = response.response_length;
+        write_u32_le(&payload[4], response.ecu_identifier);
+        write_u64_le(&payload[8], response.source_sequence);
+        write_u64_le(&payload[16], response.monotonic_us);
+        write_u32_le(&payload[24], response.capture_session_id);
+        memcpy(&payload[28], response.response, response.response_length);
+        esp_err_t result = send_payload(
+            VHOS_MESSAGE_DIAGNOSTIC_RESPONSE,
+            payload,
+            sizeof(payload),
+            VHOS_TRANSPORT_CHANNEL_STREAM,
+            VHOS_TRANSPORT_EMIT_SESSION_REQUIRED
+        );
+        ESP_LOGI(
+            TAG,
+            "J1979_PASSIVE_RESPONSE ecu=0x%03lx pid=0x%02x bytes=%u result=%s transmit=false",
+            (unsigned long)response.ecu_identifier,
+            response.pid,
+            response.response_length,
+            esp_err_to_name(result)
+        );
+    }
+}
+
 static bool copy_json_string(
     const cJSON *root,
     const char *key,
@@ -740,6 +810,32 @@ void vhos_transport_init(const char *gateway_id, vhos_transport_emit_fn emit)
         vhos_can_register_observer(send_live_can_observation, NULL) == ESP_OK) {
         can_observer_registered = true;
     }
+    if (j1979_queue == NULL) {
+        j1979_queue = xQueueCreate(VHOS_J1979_QUEUE_DEPTH, sizeof(vhos_j1979_response_t));
+        if (j1979_queue == NULL ||
+            xTaskCreate(
+                j1979_task,
+                "vhos_j1979",
+                VHOS_J1979_TASK_STACK_BYTES,
+                NULL,
+                5,
+                NULL
+            ) != pdPASS) {
+            ESP_LOGE(TAG, "J1979_PASSIVE_WORKER_UNAVAILABLE");
+            if (j1979_queue != NULL) {
+                vQueueDelete(j1979_queue);
+                j1979_queue = NULL;
+            }
+        }
+    }
+    if (j1979_queue != NULL && !j1979_observer_registered &&
+        vhos_can_register_observer(queue_passive_j1979_response, NULL) == ESP_OK) {
+        j1979_observer_registered = true;
+        ESP_LOGI(
+            TAG,
+            "J1979_PASSIVE_OBSERVER_READY active_requests=false safety_gate=default-deny"
+        );
+    }
     vhos_transport_reset();
 }
 
@@ -751,6 +847,9 @@ void vhos_transport_reset(void)
         memset(rx_buffer, 0, sizeof(rx_buffer));
         if (capture_export_queue != NULL) {
             xQueueReset(capture_export_queue);
+        }
+        if (j1979_queue != NULL) {
+            xQueueReset(j1979_queue);
         }
         xSemaphoreGive(session_lock);
         return;

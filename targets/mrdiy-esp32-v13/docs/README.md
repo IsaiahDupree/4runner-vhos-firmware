@@ -27,6 +27,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev26 deferred-control validation and physical acceptance](FIELD-VALIDATION-2026-08-17-DEV26.md) | Dev25 TX-stack failure, deferred initial health/status, exact build identity, saved-bond commissioning, sustained health, and automatic hard-reset recovery. |
 | [dev28 capture-export recovery](FIELD-VALIDATION-2026-08-18-DEV28.md) | Dev27 stale-bond field recovery, reproduced bulk-transfer GATT stall, off-callback export worker architecture, and pre-dev29 acceptance boundary. |
 | [dev29 capture retention and fault acceptance](FIELD-VALIDATION-2026-08-18-DEV29.md) | Header-only rotation protection, exact build identity, strict reset/app-death matrix, failure found in CoreBluetooth restoration, and remaining vehicle/power/export gates. |
+| [dev30 passive J1979 evidence](FIELD-VALIDATION-2026-08-18-DEV30.md) | Passive Mode 01 response recognition, exact binary evidence contract, default-deny supported-PID request planner, build identity, and physical validation boundary. |
 
 ## Governing rule
 
@@ -118,3 +119,12 @@ record. Its paired iOS `0.3.3 (9)` build and the exact dev29 firmware passed bas
 execution losses and three connected app-process deaths, with a new physical link, exact handshake,
 and live health after every fault. Electrical rail loss and nonempty interrupted capture transfer
 remain unclaimed physical gates.
+
+`v0.1.0-dev.30` adds a passive J1979 evidence observer. It accepts only standard 11-bit ECU
+responses `0x7E8`–`0x7EF`, ISO-TP single frames, and positive Mode 01 (`0x41`) payloads. The CAN
+observer never blocks the capture task: it places recognized responses in a bounded queue and a
+separate worker publishes the exact source sequence and monotonic timestamp over the established
+BLE application session. A fixed `0x7DF` supported-PID request planner is unit-bounded by signed
+plan, deterministic PARKED, idle capture, and confirmed protocol predicates. The production image
+provides no caller or transmit executor, and TWAI remains listen-only, so active diagnostics remain
+unavailable until a separately reviewed safety milestone.
