@@ -2,8 +2,9 @@
 
 Date: 2026-08-18
 
-Status: source and ESP-IDF build verified. The matching iOS 0.3.5 (11) containment is installed;
-dev31 is not yet flashed or physically accepted.
+Status: the exact clean artifact below is build-verified, flashed to the identified OBD gateway,
+and USB-bench boot verified. The matching iOS 0.3.8 (14) containment is installed. Vehicle capture,
+paused export, and interruption recovery acceptance remain open.
 
 ## Field failure that required this change
 
@@ -40,10 +41,11 @@ Dev31 makes recorder state an enforced firmware boundary rather than a client co
 10. The handshake adds the ESP-IDF reset-reason value so the iPhone trace can distinguish power,
     watchdog, panic, and software resets without an attached UART.
 
-iOS 0.3.5 complements the server boundary by requesting inventory only when `logging=true`. It
+iOS 0.3.8 complements the server boundary by requesting inventory only when `logging=true`. It
 cancels any history task and records
 `CAPTURE_SYNC_DEFERRED reason=recorder-active policy=inventory-only`. Evidence remains on the
-gateway; it is not silently discarded.
+gateway; it is not silently discarded. It also records the gateway reset reason and defers repeated
+secure reconnect attempts when an advertisement is weaker than the commissioning threshold.
 
 ## Safety invariants
 
@@ -79,9 +81,11 @@ verifying a new signed release package.
 | Gate | Result | Evidence required |
 | --- | --- | --- |
 | ESP-IDF build and partition fit | PASS | exact binary identity above; 33% free |
+| Exact artifact flashed to OBD gateway | PASS | ESP32-D0WDQ6 `94:54:c5:b0:8d:14`; NVS/storage partitions preserved |
+| USB-bench boot and retained capture | PASS | dev31/build `v0.1.0-dev.11-10-gdb1d68d4d5cb`; previous capture 126,752 bytes |
 | Active recorder rejects `capture.read` | BUILD VERIFIED | embedded rejection markers; physical command test pending |
 | Health path avoids filesystem refresh | SOURCE VERIFIED | periodic health calls the runtime-only snapshot |
-| iPhone inventory-only active-recording policy | INSTALLED | iOS 0.3.5 (11), 45 Swift tests |
+| iPhone inventory-only active-recording policy | INSTALLED | iOS 0.3.8 (14), 47 Swift tests |
 | Saved-bond reconnect with active vehicle capture | PENDING | dev31 handshake, recurring health, no chunk requests, no Pair/Forget |
 | Zero new TWAI misses during sustained capture | PENDING | compare starting and ending hardware counters under defined traffic |
 | Paused full history download | PENDING | stop/drain/flush, complete previous+current export, hashes/record counts |
@@ -89,4 +93,5 @@ verifying a new signed release package.
 | Vehicle-power loss and recovery | PENDING | retained segment, reset reason, reconnect, no manual bond repair |
 | Signed OTA and rollback | PENDING | external signing key and inactive-slot fault matrix |
 
-Dev31 is not physically accepted until those field gates run against the exact hash above.
+The exact dev31 image has passed identification, flash, retained-storage, and boot checks. It is not
+fully field accepted until the remaining vehicle gates run against the exact hash above.
