@@ -30,7 +30,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev30 passive J1979 evidence](FIELD-VALIDATION-2026-08-18-DEV30.md) | Passive Mode 01 response recognition, exact binary evidence contract, default-deny supported-PID request planner, build identity, and physical validation boundary. |
 | [dev31 live-capture/export isolation](FIELD-VALIDATION-2026-08-18-DEV31.md) | In-vehicle concurrent-export failure, firmware-enforced recorder quiescence, runtime-only health status, smaller export chunks, reset-reason evidence, exact artifact, and remaining field gates. |
 | [dev32 acquisition-quality foundation](FIELD-VALIDATION-2026-08-18-DEV32.md) | Dev31 vehicle baseline, two-stage receive pipeline, loss attribution contract, history-transfer recovery, exact unsigned artifact, and physical acceptance gates. |
-| [dev34 BLE transfer-load hardening](FIELD-VALIDATION-2026-08-18-DEV34.md) | Bounded notification backpressure, frame-boundary recovery, smaller history chunks, stream arbitration, exact unsigned artifact, device-free replay coverage, and remaining physical gates. |
+| [dev34 BLE transfer-load hardening](FIELD-VALIDATION-2026-08-18-DEV34.md) | Bounded notification backpressure, frame-boundary recovery, smaller history chunks, exact unsigned artifact, device-free replay coverage, 2026-08-20 baseline physical install/iPhone pass, and remaining load gates. |
 
 ## Governing rule
 
@@ -152,5 +152,6 @@ notification, retries only transient NimBLE resource-pressure responses, and clo
 connection epoch when a partial logical frame cannot be completed. Five-record history chunks and
 periodic-health suppression reduce competing notification demand. Increased NimBLE transport
 buffer counts and a longer requested supervision window add margin without changing listen-only
-CAN authority. The exact build passes device-free replay and host-side build gates; sustained
-physical history transfer remains a separate acceptance requirement.
+CAN authority. The exact build passes device-free replay and host-side build gates. Its baseline
+physical install, preserved-bond iPhone handshake, and short health-stream soak passed on
+2026-08-20; sustained in-vehicle history transfer remains a separate acceptance requirement.

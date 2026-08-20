@@ -145,7 +145,9 @@ bounded window, and terminate a partially delivered connection epoch if delivery
 the next session therefore starts at a complete VHOS frame boundary. History chunks are limited
 to five retained CAN records, periodic health yields while a history transfer owns the stream, and
 normal health resumes afterward. The requested link envelope is 30–45 ms, zero peripheral latency,
-and an 18-second supervision timeout. See
+and an 18-second supervision timeout. The 2026-08-20 baseline physical install, preserved-bond
+iPhone handshake, and short health-stream soak passed; the in-vehicle bulk-transfer gates remain.
+See the
 [dev34 BLE transfer-load hardening](docs/FIELD-VALIDATION-2026-08-18-DEV34.md).
 
 ## Wi-Fi access-point status
