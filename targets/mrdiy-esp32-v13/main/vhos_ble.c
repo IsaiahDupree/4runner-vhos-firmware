@@ -31,6 +31,8 @@
 #define VHOS_BLE_NOTIFICATION_PACE_MS 50U
 #define VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS 50U
 #define VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT 80U
+#define VHOS_BLE_HEALTH_INTERVAL_MS 2000U
+#define VHOS_BLE_HEALTH_QUEUE_WAIT_MS 500U
 #define VHOS_BLE_SECURITY_START_DELAY_MS 150U
 #define VHOS_BLE_CONN_INTERVAL_MIN 24U
 #define VHOS_BLE_CONN_INTERVAL_MAX 36U
@@ -722,7 +724,10 @@ static esp_err_t emit_frame(
         .connection_epoch = active_epoch,
     };
     memcpy(item.data, data, length);
-    if (xQueueSend(tx_queue, &item, 0) == pdTRUE) {
+    TickType_t queue_wait = channel == VHOS_TRANSPORT_CHANNEL_HEALTH
+                                ? pdMS_TO_TICKS(VHOS_BLE_HEALTH_QUEUE_WAIT_MS)
+                                : 0;
+    if (xQueueSend(tx_queue, &item, queue_wait) == pdTRUE) {
         return ESP_OK;
     }
     if (scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
@@ -994,9 +999,12 @@ static void tx_task(void *argument)
 static void health_task(void *argument)
 {
     (void)argument;
-    bool transfer_suppression_logged = false;
+    bool transfer_heartbeat_logged = false;
     while (true) {
-        uint32_t notification_count = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
+        uint32_t notification_count = ulTaskNotifyTake(
+            pdTRUE,
+            pdMS_TO_TICKS(VHOS_BLE_HEALTH_INTERVAL_MS)
+        );
         portENTER_CRITICAL(&state_lock);
         bool can_send = connection_handle != BLE_HS_CONN_HANDLE_NONE &&
                         link_encrypted && stream_notify_enabled && application_session_ready;
@@ -1007,21 +1015,18 @@ static void health_task(void *argument)
             initial_session_publish_pending = false;
         }
         portEXIT_CRITICAL(&state_lock);
-        bool suppress_periodic_health = vhos_transport_history_transfer_active();
-        if (can_send && suppress_periodic_health && !initial_publish) {
-            if (!transfer_suppression_logged) {
-                ESP_LOGI(
-                    TAG,
-                    "BLE_PERIODIC_HEALTH_SUPPRESSED reason=history-transfer-active "
-                    "policy=reserve-notification-capacity"
-                );
-                transfer_suppression_logged = true;
-            }
-            continue;
-        }
-        if (!suppress_periodic_health && transfer_suppression_logged) {
-            ESP_LOGI(TAG, "BLE_PERIODIC_HEALTH_RESUMED reason=history-transfer-complete");
-            transfer_suppression_logged = false;
+        bool history_transfer_active = vhos_transport_history_transfer_active();
+        if (can_send && history_transfer_active && !transfer_heartbeat_logged) {
+            ESP_LOGI(
+                TAG,
+                "BLE_PERIODIC_HEALTH_CONTINUES reason=history-transfer-active interval_ms=%u "
+                "policy=client-freshness-authority",
+                VHOS_BLE_HEALTH_INTERVAL_MS
+            );
+            transfer_heartbeat_logged = true;
+        } else if (!history_transfer_active && transfer_heartbeat_logged) {
+            ESP_LOGI(TAG, "BLE_PERIODIC_HEALTH_TRANSFER_COMPLETE cadence=unchanged");
+            transfer_heartbeat_logged = false;
         }
         if (can_send) {
             if (initial_publish) {
@@ -1030,8 +1035,15 @@ static void health_task(void *argument)
             }
             esp_err_t health_result = vhos_transport_send_health();
             bool health_queued = health_result == ESP_OK;
-            if (!health_queued && health_result != ESP_ERR_NO_MEM) {
-                ESP_LOGW(TAG, "Health queue failed: %s", esp_err_to_name(health_result));
+            if (!health_queued) {
+                ESP_LOGW(
+                    TAG,
+                    "BLE_PERIODIC_HEALTH_QUEUE_FAILED result=%s history_transfer=%u "
+                    "interval_ms=%u",
+                    esp_err_to_name(health_result),
+                    (unsigned int)history_transfer_active,
+                    VHOS_BLE_HEALTH_INTERVAL_MS
+                );
             }
 
             bool status_queued = true;

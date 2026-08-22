@@ -31,6 +31,7 @@ security boundaries, contracts, and verification procedures behind the implement
 | [dev31 live-capture/export isolation](FIELD-VALIDATION-2026-08-18-DEV31.md) | In-vehicle concurrent-export failure, firmware-enforced recorder quiescence, runtime-only health status, smaller export chunks, reset-reason evidence, exact artifact, and remaining field gates. |
 | [dev32 acquisition-quality foundation](FIELD-VALIDATION-2026-08-18-DEV32.md) | Dev31 vehicle baseline, two-stage receive pipeline, loss attribution contract, history-transfer recovery, exact unsigned artifact, and physical acceptance gates. |
 | [dev34 BLE transfer-load hardening](FIELD-VALIDATION-2026-08-18-DEV34.md) | Bounded notification backpressure, frame-boundary recovery, smaller history chunks, exact unsigned artifact, device-free replay coverage, 2026-08-20 baseline physical install/iPhone pass, and remaining load gates. |
+| [dev35 history-transfer safety heartbeat](FIELD-VALIDATION-2026-08-22-DEV35.md) | Two-second in-memory health heartbeat retained during bulk-history transfer, bounded ordered queue admission, fail-closed motion authority, build evidence, and remaining physical load gates. |
 
 ## Governing rule
 
@@ -155,3 +156,11 @@ buffer counts and a longer requested supervision window add margin without chang
 CAN authority. The exact build passes device-free replay and host-side build gates. Its baseline
 physical install, preserved-bond iPhone handshake, and short health-stream soak passed on
 2026-08-20; sustained in-vehicle history transfer remains a separate acceptance requirement.
+
+`v0.1.0-dev.35` corrects the freshness side effect of dev34's transfer ownership. The encrypted
+stream continues to emit `gateway.health` on its two-second schedule during retained-history
+download, uses a bounded health-specific queue wait that preserves FIFO sequence order, and logs
+any admission failure. The five-second mobile freshness gate can therefore remain fail-closed
+without treating a healthy transfer as silent loss of current gateway authority. The change adds no
+Park inference: motion remains `UNKNOWN` until target-validated vehicle evidence exists. See
+[the dev35 build and acceptance record](FIELD-VALIDATION-2026-08-22-DEV35.md).

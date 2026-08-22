@@ -150,6 +150,15 @@ iPhone handshake, and short health-stream soak passed; the in-vehicle bulk-trans
 See the
 [dev34 BLE transfer-load hardening](docs/FIELD-VALIDATION-2026-08-18-DEV34.md).
 
+Firmware `v0.1.0-dev.35` keeps dev34's bounded transfer behavior but restores the periodic
+`gateway.health` heartbeat while retained history is downloading. Health is scheduled every two
+seconds, receives a bounded queue-admission wait without reordering frames, and reports admission
+failure explicitly. This keeps the iPhone's five-second current-health freshness gate, and any
+future PARKED-authority prerequisites, from expiring merely because history owns the same encrypted
+stream. Vehicle motion remains
+honestly `UNKNOWN`; dev35 does not infer Park or weaken any motion gate. See the
+[dev35 history-transfer safety heartbeat](docs/FIELD-VALIDATION-2026-08-22-DEV35.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it
@@ -219,8 +228,9 @@ Design, evidence, security, and operator rationale are maintained alongside the 
 - Large framed notifications are paced at 50 ms and retry only bounded resource-pressure results.
   If a partially delivered frame exhausts that budget, the gateway closes that connection epoch so
   a subsequent session cannot interpret a tail fragment as a new VHOS frame.
-- History transfer uses five-record chunks and reserves the stream by suppressing periodic health;
-  health resumes automatically after transfer completion or session recovery.
+- History transfer uses five-record chunks. Dev35 keeps the two-second in-memory health heartbeat
+  on the same ordered stream during transfer and gives health a bounded queue-admission wait;
+  admission failure is explicit rather than silently aging the mobile freshness gate.
 - The peripheral requests a 30–45 ms connection interval, zero peripheral latency, and an
   18-second supervision timeout. Negotiated values are logged for physical reconnect diagnosis.
 - Advertising recovery runs on the NimBLE event queue after a failed connection or disconnect;

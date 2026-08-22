@@ -141,8 +141,14 @@ def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
     for control, present in required_fragments.items():
         require(present, f"BLE bond-loss recovery is missing required control: {control}")
 
+    persist_identity_start = implementation.index("static esp_err_t persist_identity(")
+    persist_identity_end = implementation.index(
+        "static esp_err_t persist_gatt_schema(",
+        persist_identity_start,
+    )
+    persist_identity = implementation[persist_identity_start:persist_identity_end]
     require(
-        implementation.index("nvs_set_blob(") < implementation.index("nvs_commit(handle)"),
+        persist_identity.index("nvs_set_blob(") < persist_identity.index("nvs_commit(handle)"),
         "BLE identity must be written before its NVS commit",
     )
     require(
@@ -161,6 +167,65 @@ def validate_ble_bond_loss_recovery(source_dir: Path, sdkconfig: str) -> str:
     return "passed:persistent-random-static-identity-epoch"
 
 
+def validate_ble_history_transfer_health_heartbeat(source_dir: Path) -> str:
+    implementation_path = source_dir / "vhos_ble.c"
+    require(implementation_path.is_file(), "BLE heartbeat implementation is missing")
+    implementation = implementation_path.read_text(encoding="utf-8")
+    health_task_start = implementation.index("static void health_task(void *argument)")
+    health_task_end = implementation.index("static void advertise(void);", health_task_start)
+    health_task = implementation[health_task_start:health_task_end]
+
+    required_fragments = {
+        "two-second health interval": "#define VHOS_BLE_HEALTH_INTERVAL_MS 2000U" in implementation,
+        "bounded health queue wait": "#define VHOS_BLE_HEALTH_QUEUE_WAIT_MS 500U" in implementation,
+        "health-specific queue admission": (
+            "channel == VHOS_TRANSPORT_CHANNEL_HEALTH" in implementation
+            and "xQueueSend(tx_queue, &item, queue_wait)" in implementation
+        ),
+        "periodic wait uses named interval": (
+            "pdMS_TO_TICKS(VHOS_BLE_HEALTH_INTERVAL_MS)" in health_task
+        ),
+        "history-transfer state remains observable": (
+            "vhos_transport_history_transfer_active()" in health_task
+            and "BLE_PERIODIC_HEALTH_CONTINUES" in health_task
+        ),
+        "health remains scheduled": "vhos_transport_send_health()" in health_task,
+        "queue failure is observable": "BLE_PERIODIC_HEALTH_QUEUE_FAILED" in health_task,
+    }
+    for control, present in required_fragments.items():
+        require(present, f"BLE history-transfer heartbeat is missing required control: {control}")
+
+    require(
+        "BLE_PERIODIC_HEALTH_SUPPRESSED" not in health_task,
+        "history transfer still suppresses the periodic health heartbeat",
+    )
+    require(
+        "suppress_periodic_health" not in health_task,
+        "history transfer still has a periodic-health suppression predicate",
+    )
+    require(
+        "continue;" not in health_task,
+        "health task has an early-continue path that can skip a scheduled heartbeat",
+    )
+    return "passed:2s-heartbeat-retained-during-history-transfer"
+
+
+def validate_vehicle_motion_authority(source_dir: Path) -> str:
+    transport_path = source_dir / "vhos_transport.c"
+    require(transport_path.is_file(), "vehicle-motion transport source is missing")
+    transport = transport_path.read_text(encoding="utf-8")
+    require(
+        r'\"vehicle_motion\":\"UNKNOWN\"' in transport,
+        "gateway health must report vehicle motion as UNKNOWN until a target-validated source exists",
+    )
+    for unsupported_state in ("PARKED", "MOVING"):
+        require(
+            rf'\"vehicle_motion\":\"{unsupported_state}\"' not in transport,
+            f"firmware fabricates unsupported vehicle-motion authority: {unsupported_state}",
+        )
+    return "passed:unknown-fail-closed-no-park-inference"
+
+
 def validate_passive_can_probe(source_dir: Path) -> str:
     implementation_path = source_dir / "vhos_can.c"
     require(implementation_path.is_file(), "passive CAN probe implementation is missing")
@@ -172,7 +237,7 @@ def validate_passive_can_probe(source_dir: Path) -> str:
         "multi-frame lock threshold": "VHOS_CAN_LOCK_MINIMUM_FRAMES 3U" in implementation,
         "passive lock evidence": "PASSIVE_CAN_LOCK" in implementation,
         "bitrate switch evidence": "PASSIVE_CAN_PROBE_SWITCH" in implementation,
-        "standard frame accounting": "message.extd" in implementation,
+        "standard frame accounting": "message->extd" in implementation,
         "explicit scan state": "VHOS_CAN_SCAN_PROBING_250K" in implementation,
     }
     for control, present in required_fragments.items():
@@ -325,12 +390,20 @@ def main() -> None:
         status_surface_check = "passed:compiled_source-default_off_release"
 
     ble_bond_loss_recovery_check = "not_applicable"
+    ble_history_transfer_health_heartbeat_check = "not_applicable"
+    vehicle_motion_authority_check = "not_applicable"
     if args.listen_only_source_dir is not None and (
         args.listen_only_source_dir / "vhos_ble.c"
     ).is_file():
         ble_bond_loss_recovery_check = validate_ble_bond_loss_recovery(
             args.listen_only_source_dir,
             sdkconfig,
+        )
+        ble_history_transfer_health_heartbeat_check = (
+            validate_ble_history_transfer_health_heartbeat(args.listen_only_source_dir)
+        )
+        vehicle_motion_authority_check = validate_vehicle_motion_authority(
+            args.listen_only_source_dir
         )
 
     authenticated_wifi_ota_check = "not_applicable"
@@ -400,6 +473,8 @@ def main() -> None:
             "listenOnlyNoTransmitPath": listen_only_check,
             "passiveCanBitrateProbe": passive_can_probe_check,
             "bleBondLossIdentityRecovery": ble_bond_loss_recovery_check,
+            "bleHistoryTransferHealthHeartbeat": ble_history_transfer_health_heartbeat_check,
+            "vehicleMotionAuthority": vehicle_motion_authority_check,
             "authenticatedReadOnlyStatusSurface": status_surface_check,
             "authenticatedTemporaryWiFiOTA": authenticated_wifi_ota_check,
             "physicalBackupFlashRollbackRestore": args.physical_recovery_status,

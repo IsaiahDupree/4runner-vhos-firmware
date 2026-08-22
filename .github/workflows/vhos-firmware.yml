@@ -29,7 +29,7 @@ jobs:
           install -m 0600 /dev/null /tmp/vhos-mrdiy-signing-key.pem
           printf '%s' "$VHOS_MRDIY_SIGNING_KEY_PEM" > /tmp/vhos-mrdiy-signing-key.pem
           VHOS_SECURE_BOOT_SIGNING_KEY=/tmp/vhos-mrdiy-signing-key.pem \
-            bash tools/build_mrdiy_v13_release.sh v0.1.0-dev.13
+            bash tools/build_mrdiy_v13_release.sh v0.1.0-dev.35
       - uses: actions/upload-artifact@v4
         with:
           name: vhos-gateway-development
