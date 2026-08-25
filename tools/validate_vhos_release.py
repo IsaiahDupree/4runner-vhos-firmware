@@ -171,6 +171,10 @@ def validate_ble_history_transfer_health_heartbeat(source_dir: Path) -> str:
     implementation_path = source_dir / "vhos_ble.c"
     require(implementation_path.is_file(), "BLE heartbeat implementation is missing")
     implementation = implementation_path.read_text(encoding="utf-8")
+    transport = (source_dir / "vhos_transport.c").read_text(encoding="utf-8")
+    policy = (source_dir / "vhos_ble_transfer_policy.h").read_text(encoding="utf-8")
+    health_header = (source_dir / "vhos_ble.h").read_text(encoding="utf-8")
+    status_surface = (source_dir / "vhos_status_web.c").read_text(encoding="utf-8")
     health_task_start = implementation.index("static void health_task(void *argument)")
     health_task_end = implementation.index("static void advertise(void);", health_task_start)
     health_task = implementation[health_task_start:health_task_end]
@@ -191,6 +195,34 @@ def validate_ble_history_transfer_health_heartbeat(source_dir: Path) -> str:
         ),
         "health remains scheduled": "vhos_transport_send_health()" in health_task,
         "queue failure is observable": "BLE_PERIODIC_HEALTH_QUEUE_FAILED" in health_task,
+        "notification attempts are observable": (
+            "BLE_GAP_EVENT_NOTIFY_TX" in implementation
+            and "notification_attempt_events" in implementation
+            and "notification_attempt_errors" in implementation
+        ),
+        "atomic history response": (
+            "VHOS_BLE_HISTORY_RECORD_CAPACITY 3U" in policy
+            and "VHOS_BLE_HISTORY_BACKPRESSURE_RETRY_LIMIT 8U" in policy
+            and "vhos_ble_history_frame_is_atomic" in implementation
+            and "VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY VHOS_BLE_HISTORY_RECORD_CAPACITY"
+            in transport
+        ),
+        "history backpressure preserves GATT epoch": (
+            "VHOS_BLE_DELIVERY_FAILURE_KEEP_EPOCH" in implementation
+            and "BLE_HISTORY_TRANSFER_DEFERRED" in implementation
+            and "action=keep-epoch" in implementation
+        ),
+        "transfer counters reach gateway health": (
+            "ble_history_nimble_accepted" in transport
+            and "ble_history_deferred" in transport
+            and "ble_backpressure_exhaustions" in transport
+        ),
+        "full counters reach read-only status": (
+            "notification_backpressure_exhaustions" in health_header
+            and '"notification_backpressure_exhaustions"' in status_surface
+            and '"notification_attempt_errors"' in status_surface
+            and '"history_frames_deferred"' in status_surface
+        ),
     }
     for control, present in required_fragments.items():
         require(present, f"BLE history-transfer heartbeat is missing required control: {control}")
@@ -207,7 +239,7 @@ def validate_ble_history_transfer_health_heartbeat(source_dir: Path) -> str:
         "continue;" not in health_task,
         "health task has an early-continue path that can skip a scheduled heartbeat",
     )
-    return "passed:2s-heartbeat-retained-during-history-transfer"
+    return "passed:atomic-history+bounded-deferral+2s-heartbeat"
 
 
 def validate_vehicle_motion_authority(source_dir: Path) -> str:

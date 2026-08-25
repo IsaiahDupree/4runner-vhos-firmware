@@ -10,13 +10,15 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "vhos_ble.h"
 #include "vhos_can.h"
+#include "vhos_ble_transfer_policy.h"
 #include "vhos_capture_store.h"
 #include "vhos_j1979.h"
 #include "vhos_ota_wifi.h"
 
 #define VHOS_HEADER_BYTES 36U
-#define VHOS_MAX_PAYLOAD_BYTES 1536U
+#define VHOS_MAX_PAYLOAD_BYTES 1984U
 #define VHOS_MAX_FRAME_BYTES (VHOS_HEADER_BYTES + VHOS_MAX_PAYLOAD_BYTES)
 #define VHOS_MESSAGE_HANDSHAKE 1U
 #define VHOS_MESSAGE_RAW_CAN_FRAME 2U
@@ -28,7 +30,7 @@
 #define VHOS_MESSAGE_CAPTURE_LOG_CHUNK 13U
 #define VHOS_CAPTURE_LOG_REQUEST_BYTES 8U
 #define VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES 16U
-#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY 5U
+#define VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY VHOS_BLE_HISTORY_RECORD_CAPACITY
 #define VHOS_CAPTURE_EXPORT_QUEUE_DEPTH 1U
 #define VHOS_CAPTURE_EXPORT_TASK_STACK_BYTES 6144U
 #define VHOS_J1979_QUEUE_DEPTH 16U
@@ -37,6 +39,17 @@
 #define VHOS_CAPTURE_PAUSE_REASON_NONE 0U
 #define VHOS_CAPTURE_PAUSE_REASON_OTA 1U
 #define VHOS_CAPTURE_PAUSE_REASON_HISTORY_TRANSFER 2U
+
+_Static_assert(
+    VHOS_CAPTURE_RECORD_BYTES == VHOS_BLE_HISTORY_RECORD_BYTES,
+    "BLE history policy must match the persisted capture record"
+);
+_Static_assert(
+    VHOS_HEADER_BYTES + VHOS_CAPTURE_LOG_CHUNK_HEADER_BYTES +
+            VHOS_CAPTURE_LOG_CHUNK_RECORD_CAPACITY * VHOS_CAPTURE_RECORD_BYTES ==
+        VHOS_BLE_HISTORY_MAX_FRAME_BYTES,
+    "BLE history responses must retain the atomic-frame size contract"
+);
 
 #ifndef VHOS_BUILD_ID
 #define VHOS_BUILD_ID "source-tree"
@@ -195,7 +208,7 @@ static esp_err_t send_handshake(void)
         "\"contract\":\"gateway.handshake\","
         "\"contract_version\":\"1.0.0\","
         "\"firmware_build_id\":\"%s\","
-        "\"firmware_version\":\"0.1.0-dev.35\","
+        "\"firmware_version\":\"0.1.0-dev.36\","
         "\"gateway_id\":\"%s\","
         "\"hardware_revision\":\"MrDIY-CAN-SHIELD-v1.3+\","
         "\"listen_only\":true,"
@@ -238,6 +251,8 @@ esp_err_t vhos_transport_send_session_status(void)
 
 static esp_err_t send_health(vhos_transport_emit_scope_t scope)
 {
+    vhos_ble_health_t ble = {0};
+    vhos_ble_get_health(&ble);
     vhos_can_health_t health = {0};
     esp_err_t can_result = vhos_can_get_health(&health);
     uint64_t observed_us = (uint64_t)esp_timer_get_time();
@@ -274,6 +289,13 @@ static esp_err_t send_health(vhos_transport_emit_scope_t scope)
         "\"can_twai_receive_overrun_frames\":%llu,"
         "\"can_twai_receive_queue_capacity\":%lu,"
         "\"can_twai_receive_queue_depth\":%lu,"
+        "\"ble_history_nimble_accepted\":%llu,"
+        "\"ble_history_deferred\":%llu,"
+        "\"ble_history_queue_rejected\":%llu,"
+        "\"ble_notification_packet_alloc_failures\":%llu,"
+        "\"ble_backpressure_events\":%llu,"
+        "\"ble_backpressure_exhaustions\":%llu,"
+        "\"ble_notification_attempt_errors\":%llu,"
         "\"capture_active\":%s,"
         "\"capture_observed_frames\":%llu,"
         "\"capture_queue_dropped_records\":%llu,"
@@ -311,6 +333,13 @@ static esp_err_t send_health(vhos_transport_emit_scope_t scope)
         (unsigned long long)health.twai_receive_overrun_frames,
         (unsigned long)health.twai_receive_queue_capacity,
         (unsigned long)health.twai_receive_queue_depth,
+        (unsigned long long)ble.history_frames_nimble_accepted,
+        (unsigned long long)ble.history_frames_deferred,
+        (unsigned long long)ble.history_frames_queue_rejected,
+        (unsigned long long)ble.notification_packet_alloc_failures,
+        (unsigned long long)ble.notification_backpressure_events,
+        (unsigned long long)ble.notification_backpressure_exhaustions,
+        (unsigned long long)ble.notification_attempt_errors,
         capture_available && capture.logging ? "true" : "false",
         (unsigned long long)capture.observed_frames,
         (unsigned long long)capture.queue_dropped_records,

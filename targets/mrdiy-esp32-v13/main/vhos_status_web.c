@@ -383,6 +383,67 @@ static cJSON *create_status_json(void)
     cJSON_AddBoolToObject(ble_json, "encrypted", ble.encrypted);
     cJSON_AddBoolToObject(ble_json, "stream_subscribed", ble.stream_subscribed);
     cJSON_AddBoolToObject(ble_json, "health_subscribed", ble.health_subscribed);
+    cJSON_AddNumberToObject(ble_json, "connection_epoch", ble.connection_epoch);
+    cJSON_AddNumberToObject(
+        ble_json,
+        "last_notification_result",
+        ble.last_notification_result
+    );
+    cJSON_AddNumberToObject(ble_json, "tx_queue_depth", ble.tx_queue_depth);
+    cJSON_AddNumberToObject(ble_json, "tx_queue_high_water", ble.tx_queue_high_water);
+    cJSON_AddNumberToObject(ble_json, "tx_queue_capacity", ble.tx_queue_capacity);
+    add_u64(ble_json, "tx_frames_admitted", ble.tx_frames_admitted);
+    add_u64(
+        ble_json,
+        "tx_frames_nimble_accepted",
+        ble.tx_frames_nimble_accepted
+    );
+    add_u64(ble_json, "tx_frames_failed", ble.tx_frames_failed);
+    add_u64(ble_json, "tx_frames_queue_rejected", ble.tx_frames_queue_rejected);
+    add_u64(ble_json, "history_frames_admitted", ble.history_frames_admitted);
+    add_u64(
+        ble_json,
+        "history_frames_nimble_accepted",
+        ble.history_frames_nimble_accepted
+    );
+    add_u64(ble_json, "history_frames_deferred", ble.history_frames_deferred);
+    add_u64(
+        ble_json,
+        "history_frames_queue_rejected",
+        ble.history_frames_queue_rejected
+    );
+    add_u64(
+        ble_json,
+        "notification_packet_alloc_failures",
+        ble.notification_packet_alloc_failures
+    );
+    add_u64(ble_json, "notification_api_attempts", ble.notification_api_attempts);
+    add_u64(
+        ble_json,
+        "notification_commands_accepted",
+        ble.notification_commands_accepted
+    );
+    add_u64(ble_json, "notification_attempt_events", ble.notification_attempt_events);
+    add_u64(
+        ble_json,
+        "notification_attempt_errors",
+        ble.notification_attempt_errors
+    );
+    add_u64(
+        ble_json,
+        "notification_backpressure_events",
+        ble.notification_backpressure_events
+    );
+    add_u64(
+        ble_json,
+        "notification_backpressure_retries",
+        ble.notification_backpressure_retries
+    );
+    add_u64(
+        ble_json,
+        "notification_backpressure_exhaustions",
+        ble.notification_backpressure_exhaustions
+    );
     add_nullable_u16(ble_json, "att_mtu", ble.connected && ble.att_mtu > 0, ble.att_mtu);
     add_nullable_u16(
         ble_json,

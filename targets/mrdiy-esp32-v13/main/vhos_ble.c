@@ -22,11 +22,13 @@
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "vhos_ble_transfer_policy.h"
 #include "vhos_transport.h"
 
-#define VHOS_BLE_TX_MAX_BYTES 1600U
+#define VHOS_BLE_TX_MAX_BYTES 2048U
 #define VHOS_BLE_FRAME_HEADER_BYTES 36U
 #define VHOS_BLE_FRAME_MESSAGE_HANDSHAKE 1U
+#define VHOS_BLE_FRAME_MESSAGE_CAPTURE_LOG_CHUNK 13U
 #define VHOS_BLE_TX_QUEUE_DEPTH 6U
 #define VHOS_BLE_NOTIFICATION_PACE_MS 50U
 #define VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS 50U
@@ -89,6 +91,29 @@ static struct ble_npl_callout security_start_callout;
 static uint32_t security_start_epoch;
 static bool identity_recovery_restart_scheduled;
 
+typedef struct {
+    int last_notification_result;
+    uint16_t queue_high_water;
+    uint64_t frames_admitted;
+    uint64_t frames_nimble_accepted;
+    uint64_t frames_failed;
+    uint64_t frames_queue_rejected;
+    uint64_t history_frames_admitted;
+    uint64_t history_frames_nimble_accepted;
+    uint64_t history_frames_deferred;
+    uint64_t history_frames_queue_rejected;
+    uint64_t notification_packet_alloc_failures;
+    uint64_t notification_api_attempts;
+    uint64_t notification_commands_accepted;
+    uint64_t notification_attempt_events;
+    uint64_t notification_attempt_errors;
+    uint64_t notification_backpressure_events;
+    uint64_t notification_backpressure_retries;
+    uint64_t notification_backpressure_exhaustions;
+} vhos_ble_tx_runtime_t;
+
+static vhos_ble_tx_runtime_t tx_runtime;
+
 static const ble_uuid128_t service_uuid = BLE_UUID128_INIT(
     0x23, 0xf1, 0xb3, 0x12, 0x8f, 0xa1, 0xfa, 0x83,
     0xd1, 0x42, 0xca, 0xff, 0xb3, 0x3e, 0x61, 0x33
@@ -150,6 +175,12 @@ static const char *host_status_name(int status)
         return "controller-hci-error";
     }
     return "other-host-error";
+}
+
+static bool host_status_is_backpressure(int status)
+{
+    return status == BLE_HS_ENOMEM || status == BLE_HS_EBUSY ||
+           status == BLE_HS_EAGAIN;
 }
 
 static const char *sm_error_name(unsigned int code)
@@ -657,6 +688,12 @@ static bool emit_scope_matches_frame(
     }
 }
 
+static bool tx_item_is_history_frame(const vhos_ble_tx_item_t *item)
+{
+    return item != NULL && item->length >= VHOS_BLE_FRAME_HEADER_BYTES &&
+           item->data[6] == VHOS_BLE_FRAME_MESSAGE_CAPTURE_LOG_CHUNK;
+}
+
 /* Caller holds state_lock. Bootstrap is the only pre-session exception. */
 static bool emit_authorized_locked(vhos_transport_emit_scope_t scope)
 {
@@ -728,6 +765,16 @@ static esp_err_t emit_frame(
                                 ? pdMS_TO_TICKS(VHOS_BLE_HEALTH_QUEUE_WAIT_MS)
                                 : 0;
     if (xQueueSend(tx_queue, &item, queue_wait) == pdTRUE) {
+        UBaseType_t depth = uxQueueMessagesWaiting(tx_queue);
+        portENTER_CRITICAL(&state_lock);
+        tx_runtime.frames_admitted++;
+        if (tx_item_is_history_frame(&item)) {
+            tx_runtime.history_frames_admitted++;
+        }
+        if (depth > tx_runtime.queue_high_water) {
+            tx_runtime.queue_high_water = (uint16_t)depth;
+        }
+        portEXIT_CRITICAL(&state_lock);
         return ESP_OK;
     }
     if (scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
@@ -738,6 +785,12 @@ static esp_err_t emit_frame(
         }
         portEXIT_CRITICAL(&state_lock);
     }
+    portENTER_CRITICAL(&state_lock);
+    tx_runtime.frames_queue_rejected++;
+    if (tx_item_is_history_frame(&item)) {
+        tx_runtime.history_frames_queue_rejected++;
+    }
+    portEXIT_CRITICAL(&state_lock);
     return ESP_ERR_NO_MEM;
 }
 
@@ -750,8 +803,16 @@ static bool notify_chunk_with_backpressure(
     int *last_result
 )
 {
+    bool history_frame = tx_item_is_history_frame(item);
+    unsigned int retry_limit = vhos_ble_notification_retry_limit(
+        history_frame,
+        VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT
+    );
+    unsigned int retry_delay_ms = history_frame
+                                      ? VHOS_BLE_HISTORY_BACKPRESSURE_RETRY_DELAY_MS
+                                      : VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS;
     int result = BLE_HS_ENOMEM;
-    for (unsigned int attempt = 0; attempt < VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT; ++attempt) {
+    for (unsigned int attempt = 0; attempt < retry_limit; ++attempt) {
         portENTER_CRITICAL(&state_lock);
         bool current = tx_item_authorized_locked(item);
         portEXIT_CRITICAL(&state_lock);
@@ -761,10 +822,18 @@ static bool notify_chunk_with_backpressure(
             }
             return false;
         }
+        if (attempt > 0U) {
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.notification_backpressure_retries++;
+            portEXIT_CRITICAL(&state_lock);
+        }
 
         struct os_mbuf *packet = os_msys_get_pkthdr(length, 0);
         if (packet == NULL) {
             result = BLE_HS_ENOMEM;
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.notification_packet_alloc_failures++;
+            portEXIT_CRITICAL(&state_lock);
         } else if (os_mbuf_append(packet, data, length) != 0) {
             os_mbuf_free_chain(packet);
             if (last_result != NULL) {
@@ -780,19 +849,40 @@ static bool notify_chunk_with_backpressure(
             );
             return false;
         } else {
+            portENTER_CRITICAL(&state_lock);
+            bool still_current = tx_item_authorized_locked(item);
+            if (still_current) {
+                tx_runtime.notification_api_attempts++;
+            }
+            portEXIT_CRITICAL(&state_lock);
+            if (!still_current) {
+                os_mbuf_free_chain(packet);
+                if (last_result != NULL) {
+                    *last_result = BLE_HS_ENOTCONN;
+                }
+                return false;
+            }
             /* NimBLE consumes packet on both success and failure. */
             result = ble_gatts_notify_custom(item->connection_handle, value_handle, packet);
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.last_notification_result = result;
+            if (result == 0) {
+                tx_runtime.notification_commands_accepted++;
+            }
+            portEXIT_CRITICAL(&state_lock);
+
             if (result == 0) {
                 if (attempt > 0) {
                     ESP_LOGI(
                         TAG,
                         "BLE_NOTIFY_BACKPRESSURE_RECOVERED scope=%s handle=%u epoch=%lu "
-                        "offset=%u retries=%u",
+                        "offset=%u retries=%u history=%u",
                         emit_scope_name(item->scope),
                         item->connection_handle,
                         (unsigned long)item->connection_epoch,
                         (unsigned int)offset,
-                        attempt
+                        attempt,
+                        (unsigned int)history_frame
                     );
                 }
                 if (last_result != NULL) {
@@ -802,41 +892,66 @@ static bool notify_chunk_with_backpressure(
             }
         }
 
-        if (result != BLE_HS_ENOMEM && result != BLE_HS_EBUSY &&
-            result != BLE_HS_EAGAIN) {
+        if (!host_status_is_backpressure(result)) {
             break;
         }
         if (attempt == 0) {
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.notification_backpressure_events++;
+            portEXIT_CRITICAL(&state_lock);
             ESP_LOGW(
                 TAG,
                 "BLE_NOTIFY_BACKPRESSURE scope=%s handle=%u epoch=%lu offset=%u rc=%d "
-                "rc_name=%s policy=bounded-retry",
+                "rc_name=%s policy=bounded-retry history=%u budget_ms=%u",
                 emit_scope_name(item->scope),
                 item->connection_handle,
                 (unsigned long)item->connection_epoch,
                 (unsigned int)offset,
                 result,
-                host_status_name(result)
+                host_status_name(result),
+                (unsigned int)history_frame,
+                (retry_limit - 1U) * retry_delay_ms
             );
         }
-        vTaskDelay(pdMS_TO_TICKS(VHOS_BLE_NOTIFY_RESOURCE_RETRY_MS));
+        if (attempt + 1U < retry_limit) {
+            vTaskDelay(pdMS_TO_TICKS(retry_delay_ms));
+        }
     }
 
     if (last_result != NULL) {
         *last_result = result;
     }
-    ESP_LOGE(
-        TAG,
-        "BLE_NOTIFY_BACKPRESSURE_EXHAUSTED scope=%s handle=%u epoch=%lu offset=%u rc=%d "
-        "rc_name=%s retries=%u",
-        emit_scope_name(item->scope),
-        item->connection_handle,
-        (unsigned long)item->connection_epoch,
-        (unsigned int)offset,
-        result,
-        host_status_name(result),
-        VHOS_BLE_NOTIFY_RESOURCE_RETRY_LIMIT
-    );
+    if (host_status_is_backpressure(result)) {
+        portENTER_CRITICAL(&state_lock);
+        tx_runtime.notification_backpressure_exhaustions++;
+        portEXIT_CRITICAL(&state_lock);
+        ESP_LOGE(
+            TAG,
+            "BLE_NOTIFY_BACKPRESSURE_EXHAUSTED scope=%s handle=%u epoch=%lu offset=%u "
+            "rc=%d rc_name=%s attempts=%u budget_ms=%u history=%u",
+            emit_scope_name(item->scope),
+            item->connection_handle,
+            (unsigned long)item->connection_epoch,
+            (unsigned int)offset,
+            result,
+            host_status_name(result),
+            retry_limit,
+            (retry_limit - 1U) * retry_delay_ms,
+            (unsigned int)history_frame
+        );
+    } else {
+        ESP_LOGE(
+            TAG,
+            "BLE_NOTIFY_DELIVERY_FAILED scope=%s handle=%u epoch=%lu offset=%u rc=%d "
+            "rc_name=%s",
+            emit_scope_name(item->scope),
+            item->connection_handle,
+            (unsigned long)item->connection_epoch,
+            (unsigned int)offset,
+            result,
+            host_status_name(result)
+        );
+    }
     return false;
 }
 
@@ -912,12 +1027,34 @@ static void tx_task(void *argument)
                 "BLE_TX_DELIVERY_DROP scope=%s reason=session-or-transport-gate",
                 emit_scope_name(item.scope)
             );
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.frames_failed++;
+            portEXIT_CRITICAL(&state_lock);
             continue;
         }
 
         uint16_t mtu = ble_att_mtu(active_connection);
-        size_t maximum_chunk = mtu > 3 ? (size_t)mtu - 3 : 20;
+        size_t maximum_chunk = vhos_ble_notification_capacity(mtu);
+        bool history_frame = tx_item_is_history_frame(&item);
+        if (history_frame && !vhos_ble_history_frame_is_atomic(mtu, item.length)) {
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.frames_failed++;
+            tx_runtime.history_frames_deferred++;
+            portEXIT_CRITICAL(&state_lock);
+            ESP_LOGW(
+                TAG,
+                "BLE_HISTORY_TRANSFER_DEFERRED handle=%u epoch=%lu mtu=%u frame_bytes=%u "
+                "required_mtu=%u reason=atomic-frame-required action=keep-epoch",
+                active_connection,
+                (unsigned long)active_epoch,
+                mtu,
+                (unsigned int)item.length,
+                (unsigned int)(item.length + 3U)
+            );
+            continue;
+        }
         bool delivery_complete = true;
+        bool delivery_failure_recorded = false;
         size_t delivered_bytes = 0;
         for (size_t offset = 0; offset < item.length; offset += maximum_chunk) {
             portENTER_CRITICAL(&state_lock);
@@ -939,12 +1076,57 @@ static void tx_task(void *argument)
                     &notify_result
                 )) {
                 delivery_complete = false;
-                terminate_failed_notification_epoch(&item, delivered_bytes, notify_result);
+                vhos_ble_delivery_failure_action_t action =
+                    vhos_ble_delivery_failure_action(history_frame, delivered_bytes);
+                portENTER_CRITICAL(&state_lock);
+                tx_runtime.frames_failed++;
+                delivery_failure_recorded = true;
+                if (action == VHOS_BLE_DELIVERY_FAILURE_KEEP_EPOCH) {
+                    tx_runtime.history_frames_deferred++;
+                }
+                portEXIT_CRITICAL(&state_lock);
+                if (action == VHOS_BLE_DELIVERY_FAILURE_TERMINATE_EPOCH) {
+                    terminate_failed_notification_epoch(&item, delivered_bytes, notify_result);
+                } else {
+                    ESP_LOGW(
+                        TAG,
+                        "BLE_HISTORY_TRANSFER_DEFERRED handle=%u epoch=%lu delivered=0 rc=%d "
+                        "rc_name=%s reason=notification-not-admitted action=keep-epoch",
+                        item.connection_handle,
+                        (unsigned long)item.connection_epoch,
+                        notify_result,
+                        host_status_name(notify_result)
+                    );
+                }
                 break;
             }
             delivered_bytes += chunk_length;
             /* Keep the controller pool below saturation when ATT MTU is still 23 bytes. */
             vTaskDelay(pdMS_TO_TICKS(VHOS_BLE_NOTIFICATION_PACE_MS));
+        }
+
+        if (delivery_complete && delivered_bytes == item.length) {
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.frames_nimble_accepted++;
+            if (history_frame) {
+                tx_runtime.history_frames_nimble_accepted++;
+            }
+            portEXIT_CRITICAL(&state_lock);
+            if (history_frame) {
+                ESP_LOGI(
+                    TAG,
+                    "BLE_HISTORY_FRAME_NIMBLE_ACCEPTED handle=%u epoch=%lu bytes=%u mtu=%u "
+                    "notifications=1 policy=atomic-notification",
+                    active_connection,
+                    (unsigned long)active_epoch,
+                    (unsigned int)delivered_bytes,
+                    mtu
+                );
+            }
+        } else if (!delivery_failure_recorded) {
+            portENTER_CRITICAL(&state_lock);
+            tx_runtime.frames_failed++;
+            portEXIT_CRITICAL(&state_lock);
         }
 
         if (item.scope == VHOS_TRANSPORT_EMIT_BOOTSTRAP_HANDSHAKE) {
@@ -1286,6 +1468,28 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         ESP_LOGW(TAG, "BLE advertising completed: reason=%d", event->adv_complete.reason);
         schedule_advertising();
         return 0;
+    case BLE_GAP_EVENT_NOTIFY_TX: {
+        portENTER_CRITICAL(&state_lock);
+        if (!event->notify_tx.indication) {
+            tx_runtime.notification_attempt_events++;
+            tx_runtime.last_notification_result = event->notify_tx.status;
+            if (event->notify_tx.status != 0) {
+                tx_runtime.notification_attempt_errors++;
+            }
+        }
+        portEXIT_CRITICAL(&state_lock);
+        if (!event->notify_tx.indication && event->notify_tx.status != 0) {
+            ESP_LOGW(
+                TAG,
+                "BLE_NOTIFY_ATTEMPT_RESULT handle=%u attribute=%u status=%d status_name=%s",
+                event->notify_tx.conn_handle,
+                event->notify_tx.attr_handle,
+                event->notify_tx.status,
+                host_status_name(event->notify_tx.status)
+            );
+        }
+        return 0;
+    }
     case BLE_GAP_EVENT_SUBSCRIBE:
         portENTER_CRITICAL(&state_lock);
         if (event->subscribe.attr_handle == stream_value_handle) {
@@ -1899,6 +2103,10 @@ esp_err_t vhos_ble_start(const char *device_name, const char *gateway_id)
     if (tx_queue == NULL || ready_semaphore == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    portENTER_CRITICAL(&state_lock);
+    memset(&tx_runtime, 0, sizeof(tx_runtime));
+    tx_runtime.last_notification_result = BLE_HS_ENOTCONN;
+    portEXIT_CRITICAL(&state_lock);
     vhos_transport_init(gateway_id, emit_frame);
 
     esp_err_t result = nimble_port_init();
@@ -2001,6 +2209,7 @@ esp_err_t vhos_ble_get_health(vhos_ble_health_t *health)
     if (health == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    uint16_t queue_depth = tx_queue == NULL ? 0U : (uint16_t)uxQueueMessagesWaiting(tx_queue);
     portENTER_CRITICAL(&state_lock);
     health->ready = host_ready;
     health->advertising = advertising_active;
@@ -2014,6 +2223,29 @@ esp_err_t vhos_ble_get_health(vhos_ble_health_t *health)
     health->connection_interval_units = active_connection_interval;
     health->connection_latency = active_connection_latency;
     health->supervision_timeout_units = active_supervision_timeout;
+    health->tx_queue_depth = queue_depth;
+    health->tx_queue_high_water = tx_runtime.queue_high_water;
+    health->tx_queue_capacity = VHOS_BLE_TX_QUEUE_DEPTH;
+    health->connection_epoch = connection_epoch;
+    health->last_notification_result = tx_runtime.last_notification_result;
+    health->tx_frames_admitted = tx_runtime.frames_admitted;
+    health->tx_frames_nimble_accepted = tx_runtime.frames_nimble_accepted;
+    health->tx_frames_failed = tx_runtime.frames_failed;
+    health->tx_frames_queue_rejected = tx_runtime.frames_queue_rejected;
+    health->history_frames_admitted = tx_runtime.history_frames_admitted;
+    health->history_frames_nimble_accepted = tx_runtime.history_frames_nimble_accepted;
+    health->history_frames_deferred = tx_runtime.history_frames_deferred;
+    health->history_frames_queue_rejected = tx_runtime.history_frames_queue_rejected;
+    health->notification_packet_alloc_failures =
+        tx_runtime.notification_packet_alloc_failures;
+    health->notification_api_attempts = tx_runtime.notification_api_attempts;
+    health->notification_commands_accepted = tx_runtime.notification_commands_accepted;
+    health->notification_attempt_events = tx_runtime.notification_attempt_events;
+    health->notification_attempt_errors = tx_runtime.notification_attempt_errors;
+    health->notification_backpressure_events = tx_runtime.notification_backpressure_events;
+    health->notification_backpressure_retries = tx_runtime.notification_backpressure_retries;
+    health->notification_backpressure_exhaustions =
+        tx_runtime.notification_backpressure_exhaustions;
     portEXIT_CRITICAL(&state_lock);
     return ESP_OK;
 }

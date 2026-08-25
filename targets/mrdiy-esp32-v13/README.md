@@ -159,6 +159,12 @@ stream. Vehicle motion remains
 honestly `UNKNOWN`; dev35 does not infer Park or weaken any motion gate. See the
 [dev35 history-transfer safety heartbeat](docs/FIELD-VALIDATION-2026-08-22-DEV35.md).
 
+Firmware `v0.1.0-dev.36` makes retained-history responses atomic at the common 185-byte Apple ATT
+MTU and gives history admission a 350 ms resource-pressure budget. An unadmitted history response
+is deferred without terminating the encrypted GATT epoch. NimBLE attempt events, queue pressure,
+and deferrals remain transport evidence while CAN RX stays isolated. See
+[dev36 atomic history delivery](docs/FIELD-VALIDATION-2026-08-24-DEV36.md).
+
 ## Wi-Fi access-point status
 
 Firmware `v0.1.0-dev.10` contains an authenticated, read-only commissioning surface but keeps it

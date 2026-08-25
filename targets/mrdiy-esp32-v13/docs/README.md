@@ -164,3 +164,9 @@ any admission failure. The five-second mobile freshness gate can therefore remai
 without treating a healthy transfer as silent loss of current gateway authority. The change adds no
 Park inference: motion remains `UNKNOWN` until target-validated vehicle evidence exists. See
 [the dev35 build and acceptance record](FIELD-VALIDATION-2026-08-22-DEV35.md).
+
+`v0.1.0-dev.36` limits history responses to one atomic ATT notification and bounds history-only
+resource retries to 350 ms. A response that cannot be admitted delivers zero bytes, records the
+exact attempt/backpressure counters, and leaves the encrypted application epoch available for
+retry. See
+[the dev36 transfer contract](FIELD-VALIDATION-2026-08-24-DEV36.md).
